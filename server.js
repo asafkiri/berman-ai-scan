@@ -61,7 +61,7 @@ const OPENAI_MAX_OUTPUT_TOKENS = 48_000;
 const OPENAI_TIMEOUT_MS = 180_000;
 // הכרעת המשתמש 30.7 (יטבתה, תקפה גם כאן): יציבות מעל עלות — אותו מודל,
 // אותה רזולוציה, אותה ארכיטקטורת קריאה-חוזרת. אין דגם זול יותר ואין תמונה קטנה יותר.
-const SERVICE_VERSION = 1; // סדרת גרסאות חדשה של שרת ברמן
+const SERVICE_VERSION = 2; // v2: שלוש שורות הכסף בבלוק התחתון מוחזרות בנפרד (נטו, מע"מ, סה"כ כולל)
 // עוגן היחידות: כמות יכולה להיות עשרונית רק בטעות קריאה; ההשוואה בסבילות אפס מעשית.
 const CHECKSUM_UNITS_TOLERANCE = 0.001;
 const CHECKSUM_RETRY_REASONING_EFFORT = "high";
@@ -100,6 +100,7 @@ const documentSchema = {
   required: [
     "noteIndex", "docNumber", "docType", "docDate", "pageCount",
     "totalUnits", "printedLines", "netToChargeExVat",
+    "vatAmountPrinted", "totalToChargeInclVat",
     "confidence", "warnings", "rows",
   ],
   properties: {
@@ -111,6 +112,12 @@ const documentSchema = {
     totalUnits: nullable("number"),
     printedLines: nullable("integer"),
     netToChargeExVat: nullable("number"),
+    // שתי השורות האחרות של בלוק הסיכום. הן אינן משמשות לאימות הכסף — "נטו
+    // לחיוב" נשאר העוגן היחיד — אלא כדי לזהות בוודאות הקלדה של השורה הלא
+    // נכונה: כשהסכום שהוקלד שווה בדיוק ל"סה הכל תעודה לחיוב", אפשר לומר
+    // לחנות איזו שורה נלקחה בטעות במקום לנחש לפי יחס.
+    vatAmountPrinted: nullable("number"),
+    totalToChargeInclVat: nullable("number"),
     confidence: { type: "number" },
     warnings: { type: "array", items: { type: "string" } },
     rows: { type: "array", items: rowSchema },
@@ -259,7 +266,7 @@ const SYSTEM_PROMPT = `אתה מפענח תעודות משלוח וחשבוני�
 5. lineNumber הוא מספר השורה המודפס בשורה עצמה, בדיוק כפי שמודפס — גם אם המספור מדלג. אם אין מספר מודפס או שאינו קריא — null.
 6. quantity היא הכמות המודפסת בשורה. unitPriceExVat הוא המחיר המודפס בעמודת המחיר — מחיר מחירון מלא ליחידה. החזר אותו כפי שהוא מודפס; אל תנסה להוזיל, לעגל או להתאים אותו לשום סכום אחר.
 7. שמור כל מספר בדיוק כפי שהוא מודפס, לרבות דיוק עשרוני. אל תגזור ערך חסר מערכים אחרים: אם ברקוד, קוד, כמות או מחיר אינם מודפסים או אינם קריאים — החזר null בשדה המתאים והוסף אזהרה. חישוב פנימי מותר רק כדי לזהות חוסר התאמה ולהזהיר עליו.
-8. שדות הסיכום מוחזרים בדיוק כפי שהם מודפסים: totalUnits הוא "סה"כ כללי" מהבלוק התחתון (סך היחידות, מודפס כמו 77.00) — לעולם לא המספר של "ביקורת:" או "נומרטור" הסמוכים לו; printedLines הוא המספר משורת "סהכ שורות"; netToChargeExVat הוא הסכום של "נטו לחיוב" בלבד — לעולם לא "סה הכל תעודה לחיוב" (שכולל מע"מ) ולא סכום המע"מ. שדה שאינו מודפס או אינו קריא — null. אל תחשב אותם בעצמך.
+8. שדות הסיכום מוחזרים בדיוק כפי שהם מודפסים: totalUnits הוא "סה"כ כללי" מהבלוק התחתון (סך היחידות, מודפס כמו 77.00) — לעולם לא המספר של "ביקורת:" או "נומרטור" הסמוכים לו; printedLines הוא המספר משורת "סהכ שורות"; netToChargeExVat הוא הסכום של "נטו לחיוב" בלבד — לעולם לא "סה הכל תעודה לחיוב" (שכולל מע"מ) ולא סכום המע"מ. שלוש שורות הכסף בבלוק התחתון מוחזרות בשלושה שדות נפרדים ולעולם אינן מתערבבות: netToChargeExVat = "נטו לחיוב"; vatAmountPrinted = סכום המע"מ המודפס (השורה שבין השתיים, לרוב עם אחוז המע"מ לצידה); totalToChargeInclVat = "סה הכל תעודה לחיוב" הכולל מע"מ (השורה התחתונה). שדה שאינו מודפס או אינו קריא — null. אל תחשב אותם בעצמך ואל תגזור אחד מהשני.
 9. docType הוא "credit" אם המסמך הוא תעודת החזרה (כותרת עם "החזרה", למשל "ח.משלוח החזרה") או תעודת/חשבונית זיכוי — כל מסמך שמחזיר סחורה או כסף למאפייה; "invoice" לתעודת משלוח או חשבונית רגילה; ו-"unknown" רק אם הכותרת אינה קריאה. במסמך כזה החזר את המספרים עם הסימן כפי שמודפס.
 10. docNumber הוא מספר התעודה המודפס מתחת לכותרת סוג המסמך (למשל מתחת ל"תעודת משלוח"). docDate הוא "תאריך יום עבודה" המודפס, בדיוק כפי שמופיע (ואם אינו קיים — התאריך שבראש המסמך). description מכיל רק את תיאור המוצר מעמודת "תיאור פריט" כפי שהוא מודפס, גם אם הוא מקוצר — אל תרחיב אותו לשם מלא ואל תתקן אותו לפי מוצר מוכר.
 11. אם חלק מהעמוד מטושטש, חלץ את השורות הקריאות והוסף אזהרה מפורשת לגבי החלק שלא נקרא. אל תמציא שורות ואל תדווח על אפס שורות כאשר נראית טבלת מוצרים שאינך מצליח לקרוא בביטחון.
@@ -301,7 +308,7 @@ export function validModelScan(scan, inputDocuments) {
     if (doc.docType !== "invoice" && doc.docType !== "credit" && doc.docType !== "unknown") return false;
     if (typeof doc.confidence !== "number" || !Number.isFinite(doc.confidence) || doc.confidence < 0 || doc.confidence > 1) return false;
     if (!Array.isArray(doc.rows) || !Array.isArray(doc.warnings) || doc.warnings.some(warning => typeof warning !== "string")) return false;
-    for (const field of ["totalUnits", "netToChargeExVat"]) {
+    for (const field of ["totalUnits", "netToChargeExVat", "vatAmountPrinted", "totalToChargeInclVat"]) {
       if (!finiteOrNull(doc[field])) return false;
     }
     if (!integerOrNull(doc.printedLines)) return false;
