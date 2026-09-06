@@ -61,7 +61,7 @@ const OPENAI_MAX_OUTPUT_TOKENS = 48_000;
 const OPENAI_TIMEOUT_MS = 180_000;
 // הכרעת המשתמש 30.7 (יטבתה, תקפה גם כאן): יציבות מעל עלות — אותו מודל,
 // אותה רזולוציה, אותה ארכיטקטורת קריאה-חוזרת. אין דגם זול יותר ואין תמונה קטנה יותר.
-const SERVICE_VERSION = 2; // v2: שלוש שורות הכסף בבלוק התחתון מוחזרות בנפרד (נטו, מע"מ, סה"כ כולל)
+const SERVICE_VERSION = 3; // v3: בלי עוגן מוקלד — בלוק הסיכום שבנייר הוא ההשוואה, ומפעיל את הקריאה החוזרת
 // עוגן היחידות: כמות יכולה להיות עשרונית רק בטעות קריאה; ההשוואה בסבילות אפס מעשית.
 const CHECKSUM_UNITS_TOLERANCE = 0.001;
 const CHECKSUM_RETRY_REASONING_EFFORT = "high";
@@ -334,47 +334,91 @@ export function validModelScan(scan, inputDocuments) {
 // המחיר המודפס הוא מחירון מלא וההנחות חבויות, ולכן אין כאן עוגן כסף.
 // העוגנים שמוקלדים בלקוח הם "סה"כ כללי" (סך יחידות) ו"שורות" (מונה שורות):
 //   Σ(כמויות השורות) = expectedUnits (במדויק), מספר השורות = expectedLines (במדויק).
+// v62: הלקוח מצלם עכשיו את התעודה לפני הקליטה, וקורא ממנה את שלושת המספרים
+// במקום להקליד אותם — ואז expectedUnits/expectedLines מגיעים ריקים. עד כאן
+// מסמך בלי עוגן מוקלד דילג על כל הבדיקה הזאת, וזה כיבה בשקט את שני
+// המנגנונים החשובים ביותר: הקריאה החוזרת המתקנת, והוויתור המיידי על צילום
+// שנקטע לפני בלוק הסיכום. מעכשיו, כשלא הוקלד דבר, ההשוואה נעשית מול הנייר
+// עצמו: בלוק הסיכום שבתחתית התעודה מודפס בנפרד מהשורות, ולכן קריאה שגויה
+// של כמות או של שורה אינה מסתדרת מולו. אותה קריאה חוזרת, אותו ויתור —
+// רק עם מקור השוואה אחר.
 export function scanChecksumMismatches(scan, inputDocuments) {
   const out = [];
   for (const doc of (scan && scan.documents) || []) {
     const input = (inputDocuments || []).find(candidate => candidate.noteIndex === doc.noteIndex);
     if (!input) continue;
-    const expectUnits = Number.isFinite(input.expectedUnits) ? input.expectedUnits : null;
-    const expectLines = Number.isFinite(input.expectedLines) ? input.expectedLines : null;
-    if (expectUnits == null && expectLines == null) continue;
-    let gotUnits = 0;
-    let gotLines = 0;
-    for (const row of doc.rows || []) {
-      gotUnits += Number.isFinite(row.quantity) ? row.quantity : 0;
-      gotLines += 1;
-    }
-    gotUnits = Math.round(gotUnits * 100) / 100;
-    const unitsOff = expectUnits != null && Math.abs(gotUnits - expectUnits) > CHECKSUM_UNITS_TOLERANCE;
-    const linesOff = expectLines != null && gotLines !== expectLines;
-    if (!unitsOff && !linesOff) continue;
+    const typedUnits = Number.isFinite(input.expectedUnits) ? input.expectedUnits : null;
+    const typedLines = Number.isFinite(input.expectedLines) ? input.expectedLines : null;
+    const printedUnits = Number.isFinite(doc.totalUnits) ? doc.totalUnits : null;
+    const printedLines = Number.isFinite(doc.printedLines) ? doc.printedLines : null;
     // צילום שנקטע לפני בלוק הסיכום (הלקח מתנובה v3): אם אף שדה סיכום מודפס
     // לא נקרא — סה"כ כללי, שורות ונטו לחיוב — הבלוק לא היה בתמונה. קריאות
     // חוזרות יקרות לא יצילו צילום קטוע; מוותרים מיד עם הסבר מדויק.
     const summaryBlockMissing = doc.totalUnits == null && doc.printedLines == null && doc.netToChargeExVat == null;
+    // אין עוגן מוקלד — הנייר עצמו הוא ההשוואה.
+    const fromPaper = typedUnits == null && typedLines == null;
+    const expectUnits = typedUnits != null ? typedUnits : printedUnits;
+    const expectLines = typedLines != null ? typedLines : printedLines;
+    let gotUnits = 0;
+    let gotLines = 0;
+    let gotRowsTotal = 0;
+    for (const row of doc.rows || []) {
+      gotUnits += Number.isFinite(row.quantity) ? row.quantity : 0;
+      gotRowsTotal += Number.isFinite(row.lineTotalExVat) ? row.lineTotalExVat : 0;
+      gotLines += 1;
+    }
+    gotUnits = Math.round(gotUnits * 100) / 100;
+    if (expectUnits == null && expectLines == null) {
+      // בהשוואה מול הנייר, היעדר בלוק הסיכום הוא הממצא עצמו — ולא סיבה
+      // לדלג בשקט. בלעדיו אין במה לאמת את הקריאה, ולכן מוותרים במפורש.
+      if (fromPaper && summaryBlockMissing) {
+        out.push({
+          noteIndex: doc.noteIndex, fromPaper: true,
+          gotUnits, expectedUnits: null, gotLines, expectedLines: null,
+          printedUnits: null, printedLines: null,
+          unitsOff: false, linesOff: false, moneyOff: false,
+          summaryBlockMissing: true, typedAnchorSuspect: false,
+        });
+      }
+      continue;
+    }
+    const unitsOff = expectUnits != null && Math.abs(gotUnits - expectUnits) > CHECKSUM_UNITS_TOLERANCE;
+    const linesOff = expectLines != null && gotLines !== expectLines;
+    // בדיקת הכסף קיימת רק בהשוואה מול הנייר. בעוגן מוקלד אין עוגן כסף —
+    // המחיר המודפס הוא מחירון מלא וההנחות חבויות — אבל סכום השורות שנקראו
+    // כן חייב להסתכם ל"נטו לחיוב" המודפס באותו נייר, כי אין בברמן הנחת
+    // מסמך נפרדת. הסיבולת היא סיבולת העיגול של הספק, 2 אג' לשורה (3 עד 25),
+    // ולכן היא אינה יכולה לירות על עיגול רגיל — רק על מחיר או כמות שנקראו
+    // שגוי. זה מוסיף למנוע התיקון עוד מקרה שהוא לבדו יודע לתקן.
+    const printedNetCents = Number.isFinite(doc.netToChargeExVat) ? Math.round(doc.netToChargeExVat * 100) : null;
+    const gotRowsCents = Math.round(gotRowsTotal * 100);
+    const moneyTolCents = Math.min(25, Math.max(3, 2 * gotLines));
+    const moneyOff = fromPaper && printedNetCents != null && Math.abs(gotRowsCents - printedNetCents) > moneyTolCents;
+    if (!unitsOff && !linesOff && !moneyOff) continue;
     // חתימת "הוקלד עוגן שגוי" (הלקח מתנובה v6): הקריאה עקבית פנימית — סכום
     // הכמויות שנקראו שווה בדיוק ל"סה"כ כללי" המודפס ומספר השורות ל"שורות"
     // המודפס — ורק העוגן שהוקלד שונה. קריאה מושלמת "תיכשל" כך לנצח; סבבים
     // חוזרים רק ישרפו זמן וכסף על מספר שהוקלד. מוותרים מיד עם ההסבר.
+    // בהשוואה מול הנייר אין מספר מוקלד שיכול להיות שגוי, ולכן החתימה כבויה.
     const unitsSelfConsistent = !unitsOff
       || (doc.totalUnits != null && Math.abs(doc.totalUnits - gotUnits) <= CHECKSUM_UNITS_TOLERANCE);
     const linesSelfConsistent = !linesOff
       || (doc.printedLines != null && doc.printedLines === gotLines);
-    const typedAnchorSuspect = !summaryBlockMissing && unitsSelfConsistent && linesSelfConsistent;
+    const typedAnchorSuspect = !fromPaper && !summaryBlockMissing && unitsSelfConsistent && linesSelfConsistent;
     out.push({
       noteIndex: doc.noteIndex,
+      fromPaper,
       gotUnits,
       expectedUnits: expectUnits,
       gotLines,
       expectedLines: expectLines,
+      gotRowsTotal: Math.round(gotRowsTotal * 100) / 100,
+      printedNet: printedNetCents == null ? null : printedNetCents / 100,
       printedUnits: doc.totalUnits == null ? null : doc.totalUnits,
       printedLines: doc.printedLines == null ? null : doc.printedLines,
       unitsOff,
       linesOff,
+      moneyOff,
       summaryBlockMissing,
       typedAnchorSuspect,
     });
@@ -386,14 +430,26 @@ function checksumTotalError(mismatches) {
   return (mismatches || []).reduce((total, item) =>
     total
     + (item.unitsOff ? Math.abs(item.gotUnits - item.expectedUnits) : 0)
-    + (item.linesOff ? Math.abs(item.gotLines - item.expectedLines) : 0), 0);
+    + (item.linesOff ? Math.abs(item.gotLines - item.expectedLines) : 0)
+    // v62: פער כסף נמדד בשקלים, ולכן הוא נספר בקנה מידה של יחידות — עשירית
+    // נקודה לשקל. אחרת פער של אגורות בודדות היה מכריע מול שורה שלמה שחסרה.
+    + (item.moneyOff ? Math.abs(item.gotRowsTotal - item.printedNet) / 10 : 0), 0);
 }
 
+// v62: הניסוח נגזר ממקור ההשוואה. "במקום X" מתאים לעוגן שהוקלד; כשההשוואה
+// היא מול הנייר, המספר הנגדי מודפס על אותו דף — וכדאי לומר את זה למודל
+// במפורש, כי זה בדיוק מה שהוא אמור לחזור ולקרוא.
 function checksumCorrectiveText(mismatches) {
   const parts = mismatches.map(item => {
     const bits = [];
-    if (item.unitsOff) bits.push(`סכום הכמויות יצא ${item.gotUnits} במקום ${item.expectedUnits}`);
-    if (item.linesOff) bits.push(`נקראו ${item.gotLines} שורות במקום ${item.expectedLines}`);
+    if (item.fromPaper) {
+      if (item.unitsOff) bits.push(`סכום הכמויות שקראת הוא ${item.gotUnits}, אבל "סה"כ כללי" המודפס בתחתית אותה תעודה הוא ${item.expectedUnits}`);
+      if (item.linesOff) bits.push(`קראת ${item.gotLines} שורות, אבל מונה "שורות" המודפס בתחתית אותה תעודה הוא ${item.expectedLines}`);
+      if (item.moneyOff) bits.push(`סכום השורות שקראת הוא ${item.gotRowsTotal} ש"ח, אבל "נטו לחיוב" המודפס בתחתית אותה תעודה הוא ${item.printedNet} ש"ח`);
+    } else {
+      if (item.unitsOff) bits.push(`סכום הכמויות יצא ${item.gotUnits} במקום ${item.expectedUnits}`);
+      if (item.linesOff) bits.push(`נקראו ${item.gotLines} שורות במקום ${item.expectedLines}`);
+    }
     return `מסמך noteIndex=${item.noteIndex}: ${bits.join(" וגם ")}.`;
   });
   return `אזהרת עוגן ביקורת: בקריאה הקודמת ${parts.join(" ")} קרא הכל מחדש בזהירות שורה-שורה: ודא שאף שורת מוצר לא הושמטה או שוכפלה, שאף שורת כותרת או סיכום לא נספרה כשורת מוצר, ושכל כמות הועתקה בדיוק כפי שמודפסת בעמודת הכמות — לא מהעמודות הסמוכות.`;
@@ -1274,9 +1330,15 @@ function decodeAnalyzeClaims(result, aliasToId) {
           if (index === 0 && Number.isFinite(document.expectedLines)) {
             anchorParts.push(`מספר שורות המוצר חייב להיות ${document.expectedLines} ("שורות")`);
           }
+          // v62: בלי עוגן מוקלד (זרימת הצילום-תחילה) בלוק הסיכום שבתחתית
+          // הנייר הוא גם המקור לנתוני התעודה וגם הדבר היחיד שמאמת את הקריאה.
+          // אומרים למודל לבדוק את עצמו מולו עוד לפני שהוא עונה — סבב תיקון
+          // שנחסך כאן שווה קריאה שלמה.
           const anchor = anchorParts.length
             ? ` · עוגן ביקורת לתעודה זו: ${anchorParts.join(", ו")}. אם הסיכום שלך יוצא שונה — עבור שוב שורה-שורה לפני התשובה: ודא שאף שורה לא הושמטה או שוכפלה ושכל כמות הועתקה מעמודת הכמות בלבד.`
-            : "";
+            : (index === 0
+              ? ` · לתעודה זו לא הוקלד עוגן, ולכן בלוק הסיכום שבתחתית הנייר הוא הבדיקה היחידה: לפני שאתה עונה, ודא שסכום הכמויות שקראת שווה ל"סה"כ כללי" המודפס, שמספר השורות שקראת שווה למונה "שורות" המודפס, ושסכום שורות הכסף שקראת מסתכם ל"נטו לחיוב" המודפס. לא נסגר — עבור שוב שורה-שורה לפני התשובה.`
+              : "");
           content.push({ type: "input_text", text: `מסמך noteIndex=${document.noteIndex}, עמוד ${index + 1} מתוך ${document.pages.length}${anchor}` });
           content.push({ type: "input_image", image_url: document.pages[index], detail: OPENAI_IMAGE_DETAIL });
         }
@@ -1382,7 +1444,11 @@ function decodeAnalyzeClaims(result, aliasToId) {
       const cutOff = firstMismatches.filter(item => item.summaryBlockMissing);
       if (cutOff.length && cutOff.length === firstMismatches.length && cutOff.length) {
         for (const item of cutOff) {
-          const warning = `בתעודה ${item.noteIndex + 1} לא נקרא בלוק הסיכום שבתחתית הנייר (סה"כ כללי / שורות / נטו לחיוב), והקריאה לא נסגרה על העוגן שהוקלד. צלם שוב את התעודה כולה, עד השורה האחרונה, כולל הסיכום.`;
+          // v62: בזרימת הצילום-תחילה בלוק הסיכום הוא לא רק אימות — הוא המקור
+          // היחיד לשלושת המספרים. בלעדיו אין לא עוגן ולא במה לאמת את הקריאה.
+          const warning = item.fromPaper
+            ? `בתעודה ${item.noteIndex + 1} לא נקרא בלוק הסיכום שבתחתית הנייר (סה"כ כללי / שורות / נטו לחיוב), ובלעדיו אי אפשר לקרוא ממנה את נתוני התעודה ולא לאמת את הקריאה. צלם שוב את התעודה כולה, עד השורה האחרונה, כולל הסיכום.`
+            : `בתעודה ${item.noteIndex + 1} לא נקרא בלוק הסיכום שבתחתית הנייר (סה"כ כללי / שורות / נטו לחיוב), והקריאה לא נסגרה על העוגן שהוקלד. צלם שוב את התעודה כולה, עד השורה האחרונה, כולל הסיכום.`;
           if (!scan.warnings.includes(warning)) scan.warnings.push(warning);
         }
         finishScan({ ok: false, serviceVersion: SERVICE_VERSION, error: "summary_block_missing", warnings: scan.warnings });
@@ -1424,11 +1490,22 @@ function decodeAnalyzeClaims(result, aliasToId) {
         }
         for (const item of scanChecksumMismatches(scan, documents)) {
           const bits = [];
-          if (item.unitsOff) bits.push(`סכום הכמויות ${item.gotUnits} במקום ${item.expectedUnits} יחידות`);
-          if (item.linesOff) bits.push(`${item.gotLines} שורות במקום ${item.expectedLines}`);
+          if (item.fromPaper) {
+            // v62: מול הנייר, האזהרה אומרת מה נקרא מול מה שמודפס באותו דף.
+            // הלקוח יעצור על זה ממילא (שער האמון), והניסוח הזה הוא מה
+            // שיאפשר לו לומר בדיוק מה לא נסגר.
+            if (item.unitsOff) bits.push(`סכום הכמויות שנקראו ${item.gotUnits} מול "סה"כ כללי" המודפס ${item.expectedUnits}`);
+            if (item.linesOff) bits.push(`${item.gotLines} שורות שנקראו מול מונה "שורות" המודפס ${item.expectedLines}`);
+            if (item.moneyOff) bits.push(`סכום השורות ₪${item.gotRowsTotal} מול "נטו לחיוב" המודפס ₪${item.printedNet}`);
+          } else {
+            if (item.unitsOff) bits.push(`סכום הכמויות ${item.gotUnits} במקום ${item.expectedUnits} יחידות`);
+            if (item.linesOff) bits.push(`${item.gotLines} שורות במקום ${item.expectedLines}`);
+          }
           const warning = item.typedAnchorSuspect
             ? `בתעודה ${item.noteIndex + 1} הקריאה תואמת את השדות המודפסים ורק העוגן שהוקלד שונה (${bits.join(", ")}) — ייתכן שההקלדה שגויה.`
-            : `עוגן ביקורת: מסמך ${item.noteIndex + 1} — ${bits.join(", ")} גם אחרי קריאה חוזרת. נדרשת בדיקה.`;
+            : item.fromPaper
+              ? `בתעודה ${item.noteIndex + 1} הקריאה אינה נסגרת מול בלוק הסיכום שבתחתית אותו נייר גם אחרי קריאה חוזרת: ${bits.join(", ")}.`
+              : `עוגן ביקורת: מסמך ${item.noteIndex + 1} — ${bits.join(", ")} גם אחרי קריאה חוזרת. נדרשת בדיקה.`;
           if (!scan.warnings.includes(warning)) scan.warnings.push(warning);
         }
       }
