@@ -440,7 +440,10 @@ function checksumTotalError(mismatches) {
 // היא מול הנייר, המספר הנגדי מודפס על אותו דף — וכדאי לומר את זה למודל
 // במפורש, כי זה בדיוק מה שהוא אמור לחזור ולקרוא.
 function checksumCorrectiveText(mismatches) {
-  const parts = mismatches.map(item => {
+  // ממצא "בלוק הסיכום חסר" אינו נושא הפרש מספרי, ולכן אין לו מה לתרום
+  // להנחיית התיקון. בדרך כלל הקורא מוותר עליו עוד קודם, אבל במקבץ שיש בו
+  // גם תעודה אחרת עם הפרש אמיתי הוא היה מגיע לכאן ומייצר משפט ריק.
+  const parts = mismatches.filter(item => item.unitsOff || item.linesOff || item.moneyOff).map(item => {
     const bits = [];
     if (item.fromPaper) {
       if (item.unitsOff) bits.push(`סכום הכמויות שקראת הוא ${item.gotUnits}, אבל "סה"כ כללי" המודפס בתחתית אותה תעודה הוא ${item.expectedUnits}`);
