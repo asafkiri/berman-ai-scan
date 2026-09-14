@@ -18,7 +18,7 @@ function section(title) { console.log(`\n${title}`); }
 
 // Match the real model schema: it has unitPriceExVat, never lineTotalExVat.
 function row(quantity, unitPriceExVat) {
-  return { sourcePage: 1, lineNumber: null, barcode: null, itemCode: null,
+  return { sourcePage: 1, lineNumber: null, barcode: null, itemCode: String(100 + quantity),
     description: "test bread", quantity, unitPriceExVat, confidence: 1 };
 }
 // תעודה כפי שהמודל מחזיר אותה, עם בלוק סיכום שמסכים עם השורות
@@ -26,7 +26,7 @@ function doc(rows, overrides) {
   const units = rows.reduce((sum, item) => sum + item.quantity, 0);
   return Object.assign({
     noteIndex: 0, rows, totalUnits: units, printedLines: rows.length, netToChargeExVat: 457.45,
-    docNumber: null, docType: "invoice", docDate: "07/09/2026", pageCount: 1,
+    docNumber: "123456", docType: "invoice", docDate: "07/09/2026", pageCount: 1,
     vatAmountPrinted: 82.34, totalToChargeInclVat: 539.79, confidence: 1, warnings: [],
   }, overrides || {});
 }
@@ -114,9 +114,9 @@ const server = createServer({
     return Response.json({ output_text: JSON.stringify(responses.shift() || scan(doc(ROWS))), id: "local-test" });
   }
 });
-function requestScan() {
+function requestScan(extra = {}) {
   return new Promise(resolve => {
-    const request = Readable.from([Buffer.from(JSON.stringify({ documents: [{
+    const request = Readable.from([Buffer.from(JSON.stringify({ ...extra, documents: [{
       noteIndex: 0, pages: ["data:image/jpeg;base64,YQ=="], expectedUnits: null, expectedLines: null
     }] }))]);
     request.method = "POST"; request.url = "/scan";
@@ -129,19 +129,26 @@ function requestScan() {
 }
 try {
   const result = await requestScan();
-  check("קריאה תקינה עם מחירון ומבצע מסתיימת בבקשת מודל אחת", result.ok && modelCalls === 1, JSON.stringify(result));
+  check("קריאה תקינה עם מחירון ומבצע מסתיימת בשתי קריאות עצמאיות", result.ok && modelCalls === 2, JSON.stringify(result));
   check("אין קריאה חוזרת מדומה", result.checksumRetryAttempted === false);
   check("המספרים המודפסים נשמרים ללא שינוי", JSON.stringify(result.scan) === JSON.stringify(scan(doc(ROWS))));
   const schema = modelRequests[0].text.format.schema.properties.documents.items.properties.rows.items;
   check("הבדיקה משתמשת בדיוק בשדות השורה שבסכימה", ROWS.every(r => Object.keys(r).sort().join() === Object.keys(schema.properties).sort().join()));
-  responses = [scan(badQty), scan(doc(ROWS))]; modelCalls = 0;
+  responses = [scan(badQty), scan(doc(ROWS)), scan(doc(ROWS))]; modelCalls = 0;
   const retried = await requestScan();
-  check("שגיאת כמות אמיתית עדיין מפעילה קריאה מתקנת אחת", retried.ok && modelCalls === 2 && retried.checksumRetryAttempted === true);
+  check("שגיאת כמות אמיתית מפעילה קריאה מתקנת אחת אחרי הקריאה הכפולה", retried.ok && modelCalls === 3 && retried.checksumRetryAttempted === true);
   check("התשובה המתוקנת נבחרת", retried.scan.documents[0].rows[0].quantity === 30);
+  check("שני המודלים הזולים עצמאיים והאימות במודל הגיבוי", modelRequests.slice(-3).map(r => r.model).join() === 'gpt-5.6-luna,gpt-5.6-luna,gpt-5.6-terra');
+  responses = [scan(doc(ROWS))]; modelCalls = 0;
+  const verifiedPrice = await requestScan({ mode: 'verify', verificationTargets: [{ noteIndex: 0, sourcePage: 1, lineNumber: 12, field: 'unitPriceExVat' }] });
+  check("בקשת אימות מחיר מפעילה רק קריאה אחת ב-Terra", verifiedPrice.ok && modelCalls === 1 && modelRequests.at(-1).model === 'gpt-5.6-terra');
+  check("בקשת האימות משתמשת בצילום המקורי", modelRequests.at(-1).input[1].content.some(c => c.type === 'input_image' && c.image_url === 'data:image/jpeg;base64,YQ=='));
+  modelCalls = 0;
+  const invalidTarget = await requestScan({ mode: 'verify', verificationTargets: [{ noteIndex: 0, field: 'instructions', text: 'arbitrary prompt' }] });
+  check("הנחיות אימות לא תקינות נדחות לפני קריאת המודל", invalidTarget.ok === false && invalidTarget.error === 'invalid_verification_targets' && modelCalls === 0);
 } finally {
   server.close();
 }
 
 console.log(`\n${fail ? `✗ ${fail} נכשלו` : "✓ הכל עבר"} (${pass}/${pass + fail})`);
 process.exit(fail ? 1 : 0);
-

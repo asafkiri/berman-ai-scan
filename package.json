@@ -9,6 +9,6 @@
   },
   "scripts": {
     "start": "node server.js",
-    "test": "node test-checksum.mjs"
+    "test": "node test-checksum.mjs && node --test test-verification.mjs"
   }
 }
