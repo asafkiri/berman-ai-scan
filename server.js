@@ -14,6 +14,7 @@
 // by this service.
 
 import http from "node:http";
+import { runVerifiedScan } from "./scan-verification.js";
 import crypto from "node:crypto";
 import { pathToFileURL } from "node:url";
 
@@ -52,19 +53,15 @@ const MAX_PAGES = 8;
 const MAX_BODY_BYTES = 30 * 1024 * 1024;
 const MAX_PAGE_BYTES = 2_600_000;
 const OPENAI_URL = "https://api.openai.com/v1/responses";
-// ברירת המחדל היא Terra — ההכרעה מ-8.8 בתנובה ("העלויות יקרות מדי ב-Sol Fast").
-// חזרה ל-Sol = משתנה סביבה OPENAI_MODEL=gpt-5.6-sol ב-Cloud Run, בלי קובץ חדש.
-const DEFAULT_OPENAI_MODEL = "gpt-5.6-terra";
+// Same models as the active service: two Luna reads, Terra only for verification.
+const DEFAULT_OPENAI_MODEL = "gpt-5.6-luna";
 const OPENAI_IMAGE_DETAIL = "original";
 const OPENAI_REASONING_EFFORT = "medium";
 const OPENAI_MAX_OUTPUT_TOKENS = 48_000;
 const OPENAI_TIMEOUT_MS = 180_000;
-// הכרעת המשתמש 30.7 (יטבתה, תקפה גם כאן): יציבות מעל עלות — אותו מודל,
-// אותה רזולוציה, אותה ארכיטקטורת קריאה-חוזרת. אין דגם זול יותר ואין תמונה קטנה יותר.
-const SERVICE_VERSION = 4; // v4: מחירי מבצע ומחירון באותה תעודה; עוגן הכסף נבדק רק בלקוח שמכיר את ההנחות
+const SERVICE_VERSION = 5; // two independent reads + one bounded verification
 // עוגן היחידות: כמות יכולה להיות עשרונית רק בטעות קריאה; ההשוואה בסבילות אפס מעשית.
 const CHECKSUM_UNITS_TOLERANCE = 0.001;
-const CHECKSUM_RETRY_REASONING_EFFORT = "high";
 const FIREBASE_PROJECT_ID = "berman-marketkiri";
 const FIREBASE_JWKS_URL = "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com";
 
@@ -420,34 +417,6 @@ export function scanChecksumMismatches(scan, inputDocuments) {
   return out;
 }
 
-function checksumTotalError(mismatches) {
-  return (mismatches || []).reduce((total, item) =>
-    total
-    + (item.unitsOff ? Math.abs(item.gotUnits - item.expectedUnits) : 0)
-    + (item.linesOff ? Math.abs(item.gotLines - item.expectedLines) : 0), 0);
-}
-
-// v62: הניסוח נגזר ממקור ההשוואה. "במקום X" מתאים לעוגן שהוקלד; כשההשוואה
-// היא מול הנייר, המספר הנגדי מודפס על אותו דף — וכדאי לומר את זה למודל
-// במפורש, כי זה בדיוק מה שהוא אמור לחזור ולקרוא.
-function checksumCorrectiveText(mismatches) {
-  // ממצא "בלוק הסיכום חסר" אינו נושא הפרש מספרי, ולכן אין לו מה לתרום
-  // להנחיית התיקון. בדרך כלל הקורא מוותר עליו עוד קודם, אבל במקבץ שיש בו
-  // גם תעודה אחרת עם הפרש אמיתי הוא היה מגיע לכאן ומייצר משפט ריק.
-  const parts = mismatches.filter(item => item.unitsOff || item.linesOff).map(item => {
-    const bits = [];
-    if (item.fromPaper) {
-      if (item.unitsOff) bits.push(`סכום הכמויות שקראת הוא ${item.gotUnits}, אבל "סה"כ כללי" המודפס בתחתית אותה תעודה הוא ${item.expectedUnits}`);
-      if (item.linesOff) bits.push(`קראת ${item.gotLines} שורות, אבל מונה "שורות" המודפס בתחתית אותה תעודה הוא ${item.expectedLines}`);
-    } else {
-      if (item.unitsOff) bits.push(`סכום הכמויות יצא ${item.gotUnits} במקום ${item.expectedUnits}`);
-      if (item.linesOff) bits.push(`נקראו ${item.gotLines} שורות במקום ${item.expectedLines}`);
-    }
-    return `מסמך noteIndex=${item.noteIndex}: ${bits.join(" וגם ")}.`;
-  });
-  return `אזהרת עוגן ביקורת: בקריאה הקודמת ${parts.join(" ")} קרא הכל מחדש בזהירות שורה-שורה: ודא שאף שורת מוצר לא הושמטה או שוכפלה, שאף שורת כותרת או סיכום לא נספרה כשורת מוצר, ושכל כמות הועתקה בדיוק כפי שמודפסת בעמודת הכמות — לא מהעמודות הסמוכות.`;
-}
-
 function allowedCorsOrigin(origin) {
   return ALLOWED_ORIGINS.has(origin) ? origin : "https://asafkiri.github.io";
 }
@@ -677,12 +646,11 @@ function getOpenAIServiceTier(env) {
 }
 
 // קסקדת מודלים (הלקח מתנובה v7): רוב הזמן זול, ובתעודה קשה המודל החזק.
-// OPENAI_RETRY_MODEL ריק = אין הסלמה; מוגדר (למשל gpt-5.6-sol) = קריאת
-// האימות החוזרת, זו שרצה רק כשהעוגן לא נסגר, עוברת אליו.
+// OPENAI_RETRY_MODEL selects the verification model; Terra is the default.
 // OPENAI_RETRY_SERVICE_TIER קובע מצב מהיר להסלמה בלבד; ריק = יורש את הרגיל.
 function getOpenAIRetryModel(env) {
   const configured = typeof env.OPENAI_RETRY_MODEL === "string" ? env.OPENAI_RETRY_MODEL.trim() : "";
-  return configured;
+  return configured || "gpt-5.6-terra";
 }
 
 function getOpenAIRetryServiceTier(env, baseTier) {
@@ -957,6 +925,8 @@ function decodeAnalyzeClaims(result, aliasToId) {
           version: SERVICE_VERSION,
           serviceVersion: SERVICE_VERSION,
           model: openaiModel,
+          scanStrategy: "dual-read-with-verification",
+          primaryReads: 2,
           serviceTier: openaiServiceTier,
           fastMode: openaiServiceTier === "priority",
           retryModel: openaiRetryModel || null,
@@ -1244,12 +1214,22 @@ function decodeAnalyzeClaims(result, aliasToId) {
       }
 
       // מצבים אחרים אינם קיימים כאן בכוונה.
-      if (body && body.mode !== undefined) {
+      if (body && body.mode !== undefined && body.mode !== "verify") {
         writeJson(response, origin, 400, { ok: false, error: "mode_not_supported" });
         return;
       }
 
       const documents = Array.isArray(body.documents) ? body.documents : [];
+      const verificationOnly = body.mode === "verify";
+      const verificationTargets = Array.isArray(body.verificationTargets) ? body.verificationTargets : [];
+      if (verificationTargets.length > 100 || verificationTargets.some(t => !t || !Number.isInteger(t.noteIndex)
+        || t.noteIndex < 0 || t.noteIndex >= documents.length
+        || !['unitPriceExVat', 'quantity', 'itemCode', 'barcode', 'netToChargeExVat', 'totals'].includes(t.field)
+        || (t.sourcePage != null && (!Number.isInteger(t.sourcePage) || t.sourcePage < 1 || t.sourcePage > (documents[t.noteIndex]?.pages?.length || 0)))
+        || (t.lineNumber != null && (!Number.isInteger(t.lineNumber) || t.lineNumber < 0 || t.lineNumber > 100000)))) {
+        writeJson(response, origin, 400, { ok: false, error: "invalid_verification_targets" });
+        return;
+      }
       const pageCount = documents.reduce((sum, document) => sum + (Array.isArray(document?.pages) ? document.pages.length : 0), 0);
       if (!documents.length || documents.length > MAX_DOCUMENTS || !pageCount || pageCount > MAX_PAGES) {
         writeJson(response, origin, 400, {
@@ -1330,15 +1310,14 @@ function decodeAnalyzeClaims(result, aliasToId) {
           const anchor = anchorParts.length
             ? ` · עוגן ביקורת לתעודה זו: ${anchorParts.join(", ו")}. אם הסיכום שלך יוצא שונה — עבור שוב שורה-שורה לפני התשובה: ודא שאף שורה לא הושמטה או שוכפלה ושכל כמות הועתקה מעמודת הכמות בלבד.`
             : (index === 0
-              ? ` · לתעודה זו לא הוקלד עוגן, ולכן בלוק הסיכום שבתחתית הנייר הוא הבדיקה היחידה: לפני שאתה עונה, ודא שסכום הכמויות שקראת שווה ל"סה"כ כללי" המודפס, שמספר השורות שקראת שווה למונה "שורות" המודפס, ושסכום שורות הכסף שקראת מסתכם ל"נטו לחיוב" המודפס. לא נסגר — עבור שוב שורה-שורה לפני התשובה.`
+              ? ` · לתעודה זו לא הוקלד עוגן, ולכן בלוק הסיכום שבתחתית הנייר הוא הבדיקה היחידה: לפני שאתה עונה, ודא שסכום הכמויות שקראת שווה ל"סה"כ כללי" המודפס, שמספר השורות שקראת שווה למונה "שורות" המודפס, ושלוש שורות הסכומים הועתקו בנפרד בדיוק מהנייר. ההנחות חבויות: אל תכפיל מחירון בכמות כדי להסיק נטו ואל תשנה מספר כדי לסגור חישוב.`
               : "");
           content.push({ type: "input_text", text: `מסמך noteIndex=${document.noteIndex}, עמוד ${index + 1} מתוך ${document.pages.length}${anchor}` });
           content.push({ type: "input_image", image_url: document.pages[index], detail: OPENAI_IMAGE_DETAIL });
         }
       }
 
-      // אותה ארכיטקטורה כמו יטבתה v133 ותנובה: קריאה, אימות מול העוגן,
-      // ובמקרה כישלון — קריאה מלאה נוספת אחת במאמץ גבוה; הטובה יותר מנצחת.
+      // Both base calls receive their own prompt and the unchanged source images.
       const attemptScan = async (correctiveText, reasoningEffort, escalate) => {
         // escalate=true רק בקריאת האימות החוזרת. אם הוגדר מודל הסלמה —
         // הקריאה הזאת רצה עליו (ובמצב המהיר של ההסלמה); אחרת הכול כרגיל.
@@ -1385,7 +1364,7 @@ function decodeAnalyzeClaims(result, aliasToId) {
             if (error && error.name === "AbortError") throw error;
           }
         } catch (error) {
-          return { fail: { status: error && error.name === "AbortError" ? 504 : 502, body: {
+          return { data, callModel, fail: { status: error && error.name === "AbortError" ? 504 : 502, body: {
             ok: false,
             error: error && error.name === "AbortError" ? "openai_timeout" : "openai_network_error",
           } } };
@@ -1393,7 +1372,7 @@ function decodeAnalyzeClaims(result, aliasToId) {
           clearTimeout(timeout);
         }
         if (!openaiResponse.ok) {
-          return { fail: { status: openaiResponse.status, body: {
+          return { data, callModel, fail: { status: openaiResponse.status, body: {
             ok: false,
             error: "openai_error",
             message: data?.error?.message || "OpenAI request failed",
@@ -1401,7 +1380,7 @@ function decodeAnalyzeClaims(result, aliasToId) {
           } } };
         }
         if (data.status === "incomplete") {
-          return { fail: { status: 502, body: {
+          return { data, callModel, fail: { status: 502, body: {
             ok: false,
             error: "incomplete_model_output",
             reason: data.incomplete_details?.reason || null,
@@ -1409,108 +1388,47 @@ function decodeAnalyzeClaims(result, aliasToId) {
           } } };
         }
         if (hasModelRefusal(data)) {
-          return { fail: { status: 502, body: { ok: false, error: "model_refusal", requestId: data.id || null } } };
+          return { data, callModel, fail: { status: 502, body: { ok: false, error: "model_refusal", requestId: data.id || null } } };
         }
         const outputText = extractOutputText(data);
         let scan;
         try {
           scan = JSON.parse(outputText);
         } catch {
-          return { fail: { status: 502, body: { ok: false, error: "invalid_model_output", requestId: data.id || null } } };
+          return { data, callModel, fail: { status: 502, body: { ok: false, error: "invalid_model_output", requestId: data.id || null } } };
         }
         if (!validModelScan(scan, documents)) {
-          return { fail: { status: 502, body: { ok: false, error: "invalid_model_output", requestId: data.id || null } } };
+          return { data, callModel, fail: { status: 502, body: { ok: false, error: "invalid_model_output", requestId: data.id || null } } };
         }
-        return { scan, data, openaiResponse };
+        return { scan, data, openaiResponse, callModel };
       };
 
-      let attempt = await attemptScan(null, OPENAI_REASONING_EFFORT);
-      if (attempt.fail) {
-        finishScan(attempt.fail.body);
+      const verified = await runVerifiedScan({ attemptScan, documents, checksum: scanChecksumMismatches,
+        verificationOnly, targets: verificationTargets });
+      const { selected, verification, reads, usage } = verified;
+      if (!selected.scan) {
+        finishScan({ ...selected.fail.body, serviceVersion: SERVICE_VERSION, verification, reads, usage });
         return;
       }
-      let { scan, data, openaiResponse } = attempt;
-
-      let checksumRetryAttempted = false;
-      const firstMismatches = scanChecksumMismatches(scan, documents);
-      // צילום שנקטע לפני בלוק הסיכום — ויתור מיידי עם הסבר, בלי סבב יקר.
-      const cutOff = firstMismatches.filter(item => item.summaryBlockMissing);
-      if (cutOff.length && cutOff.length === firstMismatches.length && cutOff.length) {
-        for (const item of cutOff) {
-          // v62: בזרימת הצילום-תחילה בלוק הסיכום הוא לא רק אימות — הוא המקור
-          // היחיד לשלושת המספרים. בלעדיו אין לא עוגן ולא במה לאמת את הקריאה.
-          const warning = item.fromPaper
-            ? `בתעודה ${item.noteIndex + 1} לא נקרא בלוק הסיכום שבתחתית הנייר (סה"כ כללי / שורות / נטו לחיוב), ובלעדיו אי אפשר לקרוא ממנה את נתוני התעודה ולא לאמת את הקריאה. צלם שוב את התעודה כולה, עד השורה האחרונה, כולל הסיכום.`
-            : `בתעודה ${item.noteIndex + 1} לא נקרא בלוק הסיכום שבתחתית הנייר (סה"כ כללי / שורות / נטו לחיוב), והקריאה לא נסגרה על העוגן שהוקלד. צלם שוב את התעודה כולה, עד השורה האחרונה, כולל הסיכום.`;
-          if (!scan.warnings.includes(warning)) scan.warnings.push(warning);
-        }
-        finishScan({ ok: false, serviceVersion: SERVICE_VERSION, error: "summary_block_missing", warnings: scan.warnings });
-        return;
-      }
-      // הקריאה עקבית פנימית עם השדות המודפסים ורק העוגן שהוקלד שונה —
-      // ויתור מיידי עם הסבר, בלי סבב יקר (מספר שהוקלד לא יתוקן בקריאה חוזרת).
-      // ההודעה גם ב-message כדי שהלקוח יציג אותה כלשונה.
-      const typedSuspect = firstMismatches.filter(item => item.typedAnchorSuspect);
-      if (typedSuspect.length && typedSuspect.length === firstMismatches.length) {
-        for (const item of typedSuspect) {
-          const printedBits = [];
-          if (item.unitsOff) printedBits.push(`"סה"כ כללי" המודפס נקרא ${item.printedUnits} וסכום הכמויות שנקראו הוא ${item.gotUnits}, בעוד שהוקלד ${item.expectedUnits}`);
-          if (item.linesOff) printedBits.push(`מונה "שורות" המודפס נקרא ${item.printedLines} ונקראו ${item.gotLines} שורות, בעוד שהוקלד ${item.expectedLines}`);
-          const warning = `בתעודה ${item.noteIndex + 1} הקריאה תואמת בדיוק את השדות המודפסים: ${printedBits.join("; ")}. ייתכן שהעוגן שהוקלד שגוי — בדוק את ההקלדה.`;
-          if (!scan.warnings.includes(warning)) scan.warnings.push(warning);
-        }
-        const first = typedSuspect[0];
-        const suggestion = first.unitsOff
-          ? `בתעודה זו ככל הנראה ${first.gotUnits} יחידות`
-          : `בתעודה זו ככל הנראה ${first.gotLines} שורות`;
-        finishScan({
-          ok: false,
-          serviceVersion: SERVICE_VERSION,
-          error: "anchor_mismatch_printed",
-          message: `הקריאה תואמת בדיוק את השדות המודפסים בתחתית התעודה, ורק העוגן שהוקלד שונה — ${suggestion}. תקן את ההקלדה וסרוק שוב.`,
-          warnings: scan.warnings,
-        });
-        return;
-      }
-      if (firstMismatches.length) {
-        checksumRetryAttempted = true;
-        const second = await attemptScan(checksumCorrectiveText(firstMismatches), CHECKSUM_RETRY_REASONING_EFFORT, true);
-        if (!second.fail) {
-          const secondMismatches = scanChecksumMismatches(second.scan, documents);
-          if (!secondMismatches.length || checksumTotalError(secondMismatches) < checksumTotalError(firstMismatches)) {
-            ({ scan, data, openaiResponse } = second);
-          }
-        }
-        for (const item of scanChecksumMismatches(scan, documents)) {
-          const bits = [];
-          if (item.fromPaper) {
-            // v62: מול הנייר, האזהרה אומרת מה נקרא מול מה שמודפס באותו דף.
-            // הלקוח יעצור על זה ממילא (שער האמון), והניסוח הזה הוא מה
-            // שיאפשר לו לומר בדיוק מה לא נסגר.
-            if (item.unitsOff) bits.push(`סכום הכמויות שנקראו ${item.gotUnits} מול "סה"כ כללי" המודפס ${item.expectedUnits}`);
-            if (item.linesOff) bits.push(`${item.gotLines} שורות שנקראו מול מונה "שורות" המודפס ${item.expectedLines}`);
-          } else {
-            if (item.unitsOff) bits.push(`סכום הכמויות ${item.gotUnits} במקום ${item.expectedUnits} יחידות`);
-            if (item.linesOff) bits.push(`${item.gotLines} שורות במקום ${item.expectedLines}`);
-          }
-          const warning = item.typedAnchorSuspect
-            ? `בתעודה ${item.noteIndex + 1} הקריאה תואמת את השדות המודפסים ורק העוגן שהוקלד שונה (${bits.join(", ")}) — ייתכן שההקלדה שגויה.`
-            : item.fromPaper
-              ? `בתעודה ${item.noteIndex + 1} הקריאה אינה נסגרת מול בלוק הסיכום שבתחתית אותו נייר גם אחרי קריאה חוזרת: ${bits.join(", ")}.`
-              : `עוגן ביקורת: מסמך ${item.noteIndex + 1} — ${bits.join(", ")} גם אחרי קריאה חוזרת. נדרשת בדיקה.`;
+      const { scan, data, openaiResponse } = selected;
+      if (verification.status === "needs_review") {
+        const fields = { unitPriceExVat: 'מחיר', quantity: 'כמות', itemCode: 'קוד פריט', barcode: 'ברקוד',
+          totalUnits: 'סך יחידות', printedLines: 'מספר שורות', totals: 'סכומים', docNumber: 'מספר תעודה',
+          docDate: 'תאריך', netToChargeExVat: 'נטו לחיוב' };
+        for (const item of verification.issues) {
+          const location = (item.sourcePage ? ' בעמוד ' + item.sourcePage : '')
+            + (item.lineNumber != null ? ' בשורה ' + item.lineNumber : '');
+          const warning = 'לא ניתן לאמת את הקריאה: ' + (fields[item.field] || 'נתוני התעודה') + location + '. בדוק את המספר המודפס.';
           if (!scan.warnings.includes(warning)) scan.warnings.push(warning);
         }
       }
-
       finishScan({
-        ok: true,
-        serviceVersion: SERVICE_VERSION,
-        scan,
-        model: data.model || openaiModel,
-        requestId: data.id || openaiResponse.headers.get("x-request-id") || null,
-        usage: data.usage || null,
-        checksumRetryAttempted,
-        checksumRetryModel: checksumRetryAttempted ? (openaiRetryModel || openaiModel) : null,
+        ok: true, serviceVersion: SERVICE_VERSION, scan,
+        model: data.model || selected.callModel || openaiModel,
+        requestId: data.id || openaiResponse?.headers.get("x-request-id") || null,
+        usage, reads, verification,
+        checksumRetryAttempted: verification.escalationAttempted,
+        checksumRetryModel: verification.escalationAttempted ? openaiRetryModel : null,
       });
     } catch (error) {
       logger.error("Unhandled scanner error", error);
@@ -1535,4 +1453,3 @@ function start() {
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   start();
 }
-
