@@ -1,0 +1,27 @@
+# בדיקות בלבד. אין כאן פריסה בכוונה.
+#
+# הפריסה ל-Cloud Run נעשית בטריגר Cloud Build שמחובר לריפו דרך
+# Developer Connect, ומדווח כאן כ-check run בשם
+# cloudrun-berman-ai-scan-europe-west1-… בכל מיזוג ל-main. הוא מוגדר בצד של
+# GCP ולא נראה מהריפו, ולכן קל לפספס אותו ולהוסיף צינור פריסה שני — שני
+# צינורות שמתחרים על אותו שירות גרועים מאחד.
+#
+# מה שהטריגר הזה לא עושה הוא להריץ את הבדיקות: קומיט שבור נפרס כמו כל קומיט
+# אחר. זה מה שהקובץ הזה מכסה.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm test
