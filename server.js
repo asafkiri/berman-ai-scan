@@ -360,13 +360,21 @@ export function scanChecksumMismatches(scan, inputDocuments) {
     const fromPaper = typedUnits == null && typedLines == null;
     const expectUnits = typedUnits != null ? typedUnits : printedUnits;
     const expectLines = typedLines != null ? typedLines : printedLines;
+    // שורת פיקדון: הלקוח סופר יחידות בלעדיה ("בתעודה סכום היחידות אינו כולל
+    // פיקדון" — index.html v173/v175), והשרת ספר אותה. תעודה תקינה עם בקבוקים
+    // נכשלה כאן בכל קריאה, גם מושלמת. שתי המוסכמות מתקבלות עכשיו, כי קריאה
+    // שגויה של כמות מזיזה את שני הסכומים באותה מידה ונתפסת בשתיהן ממילא.
     let gotUnits = 0;
+    let depositUnits = 0;
     let gotLines = 0;
     for (const row of doc.rows || []) {
-      gotUnits += Number.isFinite(row.quantity) ? row.quantity : 0;
+      const quantity = Number.isFinite(row.quantity) ? row.quantity : 0;
+      gotUnits += quantity;
+      if (/פ.?קדון/.test(String((row && row.description) || ''))) depositUnits += quantity;
       gotLines += 1;
     }
     gotUnits = Math.round(gotUnits * 100) / 100;
+    const gotUnitsExDeposit = Math.round((gotUnits - depositUnits) * 100) / 100;
     if (expectUnits == null && expectLines == null) {
       // בהשוואה מול הנייר, היעדר בלוק הסיכום הוא הממצא עצמו — ולא סיבה
       // לדלג בשקט. בלעדיו אין במה לאמת את הקריאה, ולכן מוותרים במפורש.
@@ -381,7 +389,8 @@ export function scanChecksumMismatches(scan, inputDocuments) {
       }
       continue;
     }
-    const unitsOff = expectUnits != null && Math.abs(gotUnits - expectUnits) > CHECKSUM_UNITS_TOLERANCE;
+    const unitsOff = expectUnits != null && Math.abs(gotUnits - expectUnits) > CHECKSUM_UNITS_TOLERANCE
+      && Math.abs(gotUnitsExDeposit - expectUnits) > CHECKSUM_UNITS_TOLERANCE;
     const linesOff = expectLines != null && gotLines !== expectLines;
     // אין סכומי שורות בפלט הסריקה: עמודת הסכום בנייר ריקה. מחירון × כמות
     // גם אינו הנטו, כי ההנחות חבויות ולעיתים רק חלק מהמבצעים כבר ניתנו.
@@ -394,7 +403,8 @@ export function scanChecksumMismatches(scan, inputDocuments) {
     // חוזרים רק ישרפו זמן וכסף על מספר שהוקלד. מוותרים מיד עם ההסבר.
     // בהשוואה מול הנייר אין מספר מוקלד שיכול להיות שגוי, ולכן החתימה כבויה.
     const unitsSelfConsistent = !unitsOff
-      || (doc.totalUnits != null && Math.abs(doc.totalUnits - gotUnits) <= CHECKSUM_UNITS_TOLERANCE);
+      || (doc.totalUnits != null && (Math.abs(doc.totalUnits - gotUnits) <= CHECKSUM_UNITS_TOLERANCE
+        || Math.abs(doc.totalUnits - gotUnitsExDeposit) <= CHECKSUM_UNITS_TOLERANCE));
     const linesSelfConsistent = !linesOff
       || (doc.printedLines != null && doc.printedLines === gotLines);
     const typedAnchorSuspect = !fromPaper && !summaryBlockMissing && unitsSelfConsistent && linesSelfConsistent;

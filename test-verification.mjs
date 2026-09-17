@@ -128,3 +128,87 @@ test('multiple documents compare their own rows and summaries', () => {
   const issues = compareScans(a, b);
   assert.equal(issues.length, 1); assert.equal(issues[0].noteIndex, 1);
 });
+
+// ===== הסכמה תלת-כיוונית גוברת על ביטחון מדווח =====
+// שלוש קריאות שתמללו את אותו תא זהה הן ראיה חזקה מדיווח עצמי של קריאה אחת.
+// ההקלה חלה רק על low_confidence, ורק כששלוש הקריאות באמת מסכימות.
+const lowRow = (scan, index = 0, value = .7) => { scan.documents[0].rows[index].confidence = value; return scan; };
+
+test('three reads that agree character-for-character clear a low-confidence row', async () => {
+  const value = await run([result(lowRow(paper())), result(paper()), result(lowRow(paper()), 'terra')]);
+  assert.equal(value.calls.length, 3);
+  assert.equal(value.verification.status, 'verified');
+  assert.deepEqual(value.verification.issues, []);
+  assert.equal(value.verification.agreementCleared, 1);
+});
+// המקרה שההקלה הנאיבית הייתה בולעת: הזוג הזול הסכים על 8.5, ההסלמה נפתחה מסיבה
+// אחרת לגמרי, והקריאה החזקה — זו שנשמרת — קראה 3.5 בביטחון נמוך. ההסכמה שייכת
+// למספר אחר, ולכן אסור לה לכסות על המספר הזה.
+test('a strong read that drifts from the agreeing pair still stops on its own low confidence', async () => {
+  const second = paper(); second.documents[0].docNumber = '87654399';
+  const drifted = lowRow(paper()); drifted.documents[0].rows[0].unitPriceExVat = 3.5;
+  const value = await run([result(paper()), result(second), result(drifted, 'terra')]);
+  assert.equal(value.calls.length, 3);
+  assert.equal(value.selected.scan.documents[0].rows[0].unitPriceExVat, 3.5);
+  assert.equal(value.verification.status, 'needs_review');
+  assert.deepEqual(value.verification.issues.map(i => i.field + '/' + i.reason), ['row/low_confidence']);
+  assert.equal(value.verification.agreementCleared, 0);
+});
+test('agreement never clears a confidence below the floor', async () => {
+  const value = await run([result(lowRow(paper(), 0, .4)), result(paper()), result(lowRow(paper(), 0, .4), 'terra')]);
+  assert.equal(value.verification.status, 'needs_review');
+  assert.deepEqual(value.verification.issues.map(i => i.field), ['row']);
+});
+test('agreement clears a low document confidence only when every summary field matches', async () => {
+  const dim = () => { const s = paper(); s.documents[0].confidence = .7; return s; };
+  const agreed = await run([result(dim()), result(paper()), result(dim(), 'terra')]);
+  assert.equal(agreed.verification.status, 'verified');
+  assert.deepEqual(agreed.verification.issues, []);
+  const moved = dim(); moved.documents[0].docNumber = '87654322';
+  const drifted = await run([result(dim()), result(paper()), result(moved, 'terra')]);
+  assert.equal(drifted.verification.status, 'needs_review');
+  assert.deepEqual(drifted.verification.issues.map(i => i.field), ['document']);
+});
+test('agreement never clears evidence: unreadable cells, totals and checksum still block', async () => {
+  const broken = () => { const s = lowRow(paper()); s.documents[0].rows[0].quantity = 0; return s; };
+  const value = await run([result(broken()), result(broken()), result(broken(), 'terra')]);
+  assert.equal(value.verification.status, 'needs_review');
+  const fields = value.verification.issues.map(i => i.field);
+  assert.ok(fields.includes('quantity'), 'unreadable quantity must survive agreement');
+  assert.ok(fields.includes('totalUnits'), 'the units checksum must survive agreement');
+  assert.ok(!fields.includes('row'), 'the agreed self-report is the only thing cleared');
+});
+test('a failed verification read keeps full strictness — a pair alone clears nothing', async () => {
+  const value = await run([result(lowRow(paper())), result(lowRow(paper())), { fail: { body: { error: 'boom' } } }]);
+  assert.equal(value.verification.status, 'needs_review');
+  assert.ok(value.verification.issues.some(i => i.reason === 'low_confidence'));
+  assert.equal(value.verification.agreementCleared, 0);
+});
+test('duplicate product lines cannot borrow each other proof', async () => {
+  const twice = () => { const s = paper(); const row = structuredClone(s.documents[0].rows[0]);
+    row.lineNumber = 6; s.documents[0].rows.push(row); s.documents[0].totalUnits = 18;
+    s.documents[0].printedLines = 3; return s; };
+  const one = twice(); one.documents[0].rows[2].confidence = .7;
+  const other = twice(); other.documents[0].rows[2].unitPriceExVat = 9.5;
+  const value = await run([result(one), result(other), result(one, 'terra')]);
+  assert.equal(value.verification.status, 'needs_review');
+  assert.deepEqual(value.verification.issues.map(i => i.field), ['row']);
+});
+
+// ===== שורת פיקדון אינה פער כמויות =====
+// הלקוח סופר יחידות בלי פיקדון, השרת ספר איתו — וכל תעודה עם בקבוקים נכשלה.
+test('a deposit line no longer fires the units checksum on a correct read', () => {
+  const scan = paper();
+  scan.documents[0].rows.push({ sourcePage: 1, lineNumber: 13, itemCode: '900', barcode: '77',
+    description: 'פיקדון · בקבוק', quantity: 6, unitPriceExVat: 1.2, confidence: .99 });
+  scan.documents[0].printedLines = 3;
+  assert.deepEqual(inspectScan(scan, documents, scanChecksumMismatches), []);
+});
+test('a real quantity misread is still caught on a note that has a deposit line', () => {
+  const scan = paper();
+  scan.documents[0].rows.push({ sourcePage: 1, lineNumber: 13, itemCode: '900', barcode: '77',
+    description: 'פיקדון · בקבוק', quantity: 6, unitPriceExVat: 1.2, confidence: .99 });
+  scan.documents[0].printedLines = 3;
+  scan.documents[0].rows[0].quantity = 6;
+  assert.deepEqual(inspectScan(scan, documents, scanChecksumMismatches).map(i => i.field), ['totalUnits']);
+});
