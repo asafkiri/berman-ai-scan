@@ -68,3 +68,28 @@ npm test     # בדיקות עוגן הביקורת
 
 
 הבדיקות משתמשות במבנה השורות האמיתי של המודל. מסלול הבקשה נבדק בזיכרון עם חתימת אימות ומודל מדומים, בלי פתיחת חיבור רשת: קריאה תקינה מסתיימת בשתי קריאות מקבילות, ושגיאת כמות או מחיר מפעילה קריאת אימות שלישית לכל היותר.
+
+## פריסה
+
+מיזוג ל-`main` מריץ את `.github/workflows/deploy.yml`: קודם `npm test`,
+ורק אם הוא עבר — `gcloud run deploy` של השירות `berman-ai-scan` באזור
+`europe-west1`, ואז בדיקת `/health` על הכתובת שחזרה. פריסה שעלתה אך אינה
+עונה נכשלת אדום במקום להיראות ירוקה.
+
+**חיבור ההרשאה — פעם אחת.** עד שהיא מחוברת הריצה מסתיימת ירוקה עם הודעה,
+ולא נכשלת בכל מיזוג. שתי אפשרויות, ב-Settings → Secrets and variables → Actions:
+
+- **מומלץ — Workload Identity Federation** (בלי מפתח קבוע ב-GitHub):
+  `GCP_WIF_PROVIDER` (מזהה מלא של ה-provider) ו-`GCP_SERVICE_ACCOUNT`
+  (כתובת חשבון השירות).
+- **פשוט יותר — מפתח חשבון שירות**: `GCP_SA_KEY` ובו ה-JSON המלא.
+
+לחשבון השירות דרושים `roles/run.admin`, `roles/cloudbuild.builds.editor`,
+`roles/artifactregistry.writer` ו-`roles/iam.serviceAccountUser`.
+
+**משתני הסביבה אינם נוגעים בפריסה, בכוונה.** `OPENAI_API_KEY`,
+`OPENAI_MODEL` ו-`OPENAI_RETRY_MODEL` מוגדרים על השירות עצמו ב-Cloud Run.
+פריסה שמגדירה משתנים מחליפה את *כל* הקיימים, ולכן ה-workflow אינו מגדיר
+אף אחד ומשמר את מה שכבר שם.
+
+פריסה ידנית, אם צריך: `gcloud run deploy berman-ai-scan --source . --region europe-west1`
