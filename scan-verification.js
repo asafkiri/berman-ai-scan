@@ -88,6 +88,55 @@ export function verificationPrompt(targets = []) {
     + 'לא נמסרים לך מחירים צפויים או תשובות קודמות. ' + locations;
 }
 
+// Three reads transcribing the same cell character-for-character is stronger
+// evidence than any single read's self-scored confidence, and the pair is already
+// paid for on every scan. So agreement is allowed to clear 'low_confidence' — and
+// nothing else. Every issue that carries real evidence (an unreadable cell, a
+// totals or checksum inconsistency, a disagreement) keeps its full blocking power,
+// and a strong read that drifts from the pair re-arms the flag instead of hiding.
+// Below the floor the model is not hedging, it is saying it could not see the
+// cell; three correlated guesses do not answer that, so it still reaches the user.
+const AGREEMENT_CONFIDENCE_FLOOR = 0.5;
+function rowKey(doc, row) {
+  return JSON.stringify([doc.noteIndex, rowFields.map(field => normalized(field, row[field]))]);
+}
+function docKey(doc) {
+  return JSON.stringify([doc.noteIndex, documentFields.map(field => normalized(field, doc[field]))]);
+}
+function tallies(scan, keysOf) {
+  const counts = new Map();
+  for (const doc of scan.documents || []) for (const key of keysOf(doc)) counts.set(key, (counts.get(key) || 0) + 1);
+  return counts;
+}
+// scans[0] is the read being inspected. A tuple counts as agreed only when every
+// other read holds it at least as often, so one of two identical product lines
+// can never borrow the other's proof.
+function agreedTuples(scans, keysOf) {
+  const [mine, ...others] = scans.map(scan => tallies(scan, keysOf));
+  const agreed = new Set();
+  for (const [key, count] of mine) if (others.every(other => (other.get(key) || 0) >= count)) agreed.add(key);
+  return key => agreed.has(key);
+}
+// Keyed on the normalized printed fields, never on rowIndex across reads: each
+// read sorts its own rows, so a positional key would silently pair up the wrong
+// lines. Inside `scan` itself rowIndex is exact, and that is the only way it is used.
+function withoutAgreedConfidence(issues, scan, others) {
+  const scans = [scan, ...others.filter(other => other !== scan)];
+  if (scans.length < 3) return issues;
+  const rowAgreed = agreedTuples(scans, doc => (doc.rows || []).map(row => rowKey(doc, row)));
+  const docAgreed = agreedTuples(scans, doc => [docKey(doc)]);
+  const byNote = new Map((scan.documents || []).map(doc => [doc.noteIndex, doc]));
+  return issues.filter(item => {
+    if (item.reason !== 'low_confidence') return true;
+    const doc = byNote.get(item.noteIndex);
+    if (!doc) return true;
+    if (item.field === 'document') return !(doc.confidence >= AGREEMENT_CONFIDENCE_FLOOR && docAgreed(docKey(doc)));
+    const row = item.rowIndex == null ? null : (doc.rows || [])[item.rowIndex];
+    if (!row) return true;
+    return !(row.confidence >= AGREEMENT_CONFIDENCE_FLOOR && rowAgreed(rowKey(doc, row)));
+  });
+}
+
 // One upload, two independent base calls, at most one stronger read.
 export async function runVerifiedScan({ attemptScan, documents, checksum, verificationOnly = false, targets = [] }) {
   const reads = [];
@@ -100,13 +149,13 @@ export async function runVerifiedScan({ attemptScan, documents, checksum, verifi
       usage: result.data?.usage || null, escalation: escalate, error: result.fail?.body?.error || null });
     return result;
   };
-  let selected, issues = [], escalationAttempted = verificationOnly;
+  let selected, issues = [], escalationAttempted = verificationOnly, agreementScans = [];
   if (verificationOnly) selected = await read(true);
   else {
     const pair = await Promise.all([read(false, 1), read(false, 2)]);
     const good = pair.filter(r => r.scan);
     selected = good[0] || pair[0];
-    if (good.length === 2) issues.push(...compareScans(good[0].scan, good[1].scan));
+    if (good.length === 2) { issues.push(...compareScans(good[0].scan, good[1].scan)); agreementScans = good.map(r => r.scan); }
     else issues.push({ noteIndex: 0, field: 'document', reason: 'read_failed' });
     for (const result of good) issues.push(...inspectScan(result.scan, documents, checksum));
     if (issues.length) {
@@ -121,8 +170,13 @@ export async function runVerifiedScan({ attemptScan, documents, checksum, verifi
   }
   const remaining = selected.scan ? inspectScan(selected.scan, documents, checksum) : issues;
   if (selected.verificationFailed) remaining.push(...issues);
-  const status = !selected.scan || remaining.length ? 'needs_review' : escalationAttempted ? 'verified' : 'agreed';
+  // A failed verification leaves no third transcription to agree with, so that
+  // path keeps its full strictness rather than clearing anything on a pair alone.
+  const evidenced = selected.scan && !selected.verificationFailed
+    ? withoutAgreedConfidence(remaining, selected.scan, agreementScans) : remaining;
+  const status = !selected.scan || evidenced.length ? 'needs_review' : escalationAttempted ? 'verified' : 'agreed';
   return { selected, verification: { version: 1, status, primaryReads: verificationOnly ? 0 : 2,
-    escalationAttempted, reasons: [...new Set(issues.map(i => i.reason))], issues: remaining,
+    escalationAttempted, reasons: [...new Set(issues.map(i => i.reason))], issues: evidenced,
+    agreementCleared: remaining.length - evidenced.length,
     readCount: reads.length }, reads, usage: totalUsage(reads) };
 }
