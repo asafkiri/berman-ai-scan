@@ -93,6 +93,31 @@ check("ושורה חסרה נתפסת גם בלי שדה היחידות", m7b.le
 section("[8] מסמך בלי קלט תואם");
 check("מדולג בלי לקרוס", scanChecksumMismatches(scan(doc(ROWS)), []).length === 0);
 
+section("[10] SERVICE_VERSION 6 — תעודה שנייה בתוך קבוצת תמונות אחת");
+// 20.9.2026: תעודת משלוח ולצידה תעודה שנייה של אותו משלוח צולמו ככרטיס אחד.
+// המודל החזיר את הסיכום של העמוד הראשון ואת שורות שני העמודים, ובלי שדה
+// מובנה יכול היה רק להתריע במילים — והבדיקה כאן נכשלה על 79 מול 71 ו-6 מול 5.
+const secondNote = { ...row(8, 7.95), sourcePage: 2, itemCode: "238" };
+const twoPages = [{ noteIndex: 0, pages: ["p1", "p2"], expectedUnits: null, expectedLines: null }];
+// בלוק הסיכום שנקרא הוא של העמוד הראשון בלבד: 71 יח׳ ו-5 שורות.
+const twoNotes = doc(ROWS.concat([secondNote]), { pageCount: 2, totalUnits: 71, printedLines: 5, separateDocuments: [{ sourcePage: 2, docNumber: "290094585" }] });
+check("הדיווח תקין בסכימה", validModelScan(scan(twoNotes), twoPages));
+check("שורות התעודה השנייה אינן נמדדות מול הסיכום של הראשונה", scanChecksumMismatches(scan(twoNotes), twoPages).length === 0, JSON.stringify(scanChecksumMismatches(scan(twoNotes), twoPages)));
+const unreported = doc(ROWS.concat([secondNote]), { pageCount: 2, totalUnits: 71, printedLines: 5, separateDocuments: [] });
+const m10 = scanChecksumMismatches(scan(unreported), twoPages);
+check("בלי דיווח — הממצא הישן נשאר (79 מול 71, 6 מול 5)", m10.length === 1 && m10[0].unitsOff === true && m10[0].linesOff === true, JSON.stringify(m10));
+// דיווח שגוי אינו מכבה את הביקורת: העמוד הראשון לבדו אינו נסגר על הסיכום.
+const wrongSplit = doc(ROWS.slice(0, 3).concat(ROWS.slice(3).map(r => ({ ...r, sourcePage: 2 }))),
+  { pageCount: 2, separateDocuments: [{ sourcePage: 2, docNumber: null }] });
+const m10b = scanChecksumMismatches(scan(wrongSplit), twoPages);
+check("דיווח שגוי על פיצול נתפס — העמוד הראשון אינו נסגר לבדו", m10b.length === 1 && m10b[0].unitsOff === true && m10b[0].linesOff === true, JSON.stringify(m10b));
+check("תעודה של שני עמודים בלי דיווח נמדדת על שני העמודים",
+  scanChecksumMismatches(scan(doc(ROWS.slice(0, 3).concat(ROWS.slice(3).map(r => ({ ...r, sourcePage: 2 }))), { pageCount: 2, separateDocuments: [] })), twoPages).length === 0);
+check("עמוד מחוץ לטווח נדחה", !validModelScan(scan(doc(ROWS, { separateDocuments: [{ sourcePage: 3, docNumber: null }] })), twoPages));
+check("מספר תעודה שאינו מחרוזת נדחה", !validModelScan(scan(doc(ROWS, { separateDocuments: [{ sourcePage: 2, docNumber: 290094585 }] })), twoPages));
+check("מבנה שאינו מערך נדחה", !validModelScan(scan(doc(ROWS, { separateDocuments: { sourcePage: 2 } })), twoPages));
+check("פלט בלי השדה (סכימה ישנה) עדיין תקין", validModelScan(scan(doc(ROWS)), [{ noteIndex: 0, pages: ["image"] }]));
+
 section("[9] מסלול הבקשה המלא בזיכרון — בלי פתיחת חיבור רשת");
 const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
 const jwk = { ...publicKey.export({ format: "jwk" }), kid: "local-test" };
@@ -132,8 +157,12 @@ try {
   check("קריאה תקינה עם מחירון ומבצע מסתיימת בשתי קריאות עצמאיות", result.ok && modelCalls === 2, JSON.stringify(result));
   check("אין קריאה חוזרת מדומה", result.checksumRetryAttempted === false);
   check("המספרים המודפסים נשמרים ללא שינוי", JSON.stringify(result.scan) === JSON.stringify(scan(doc(ROWS))));
-  const schema = modelRequests[0].text.format.schema.properties.documents.items.properties.rows.items;
+  const documentSchema = modelRequests[0].text.format.schema.properties.documents.items;
+  const schema = documentSchema.properties.rows.items;
   check("הבדיקה משתמשת בדיוק בשדות השורה שבסכימה", ROWS.every(r => Object.keys(r).sort().join() === Object.keys(schema.properties).sort().join()));
+  check("separateDocuments נשלח למודל כשדה חובה (סכימה קפדנית)",
+    documentSchema.required.includes("separateDocuments") && documentSchema.properties.separateDocuments.items.required.join() === "sourcePage,docNumber");
+  check("ההנחיה למודל מסבירה מה לעשות עם תעודה שנייה בקבוצה", modelRequests[0].input[0].content[0].text.includes("separateDocuments"));
   responses = [scan(badQty), scan(doc(ROWS)), scan(doc(ROWS))]; modelCalls = 0;
   const retried = await requestScan();
   check("שגיאת כמות אמיתית מפעילה קריאה מתקנת אחת אחרי הקריאה הכפולה", retried.ok && modelCalls === 3 && retried.checksumRetryAttempted === true);

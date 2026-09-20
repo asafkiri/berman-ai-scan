@@ -59,7 +59,7 @@ const OPENAI_IMAGE_DETAIL = "original";
 const OPENAI_REASONING_EFFORT = "medium";
 const OPENAI_MAX_OUTPUT_TOKENS = 48_000;
 const OPENAI_TIMEOUT_MS = 180_000;
-const SERVICE_VERSION = 5; // two independent reads + one bounded verification
+const SERVICE_VERSION = 6; // separateDocuments: a second printed note inside one image group is reported, not merged
 // עוגן היחידות: כמות יכולה להיות עשרונית רק בטעות קריאה; ההשוואה בסבילות אפס מעשית.
 const CHECKSUM_UNITS_TOLERANCE = 0.001;
 const FIREBASE_PROJECT_ID = "berman-marketkiri";
@@ -98,7 +98,7 @@ const documentSchema = {
     "noteIndex", "docNumber", "docType", "docDate", "pageCount",
     "totalUnits", "printedLines", "netToChargeExVat",
     "vatAmountPrinted", "totalToChargeInclVat",
-    "confidence", "warnings", "rows",
+    "confidence", "warnings", "rows", "separateDocuments",
   ],
   properties: {
     noteIndex: { type: "integer" },
@@ -118,6 +118,20 @@ const documentSchema = {
     confidence: { type: "number" },
     warnings: { type: "array", items: { type: "string" } },
     rows: { type: "array", items: rowSchema },
+    // SERVICE_VERSION 6: קבוצת תמונות אחת מכילה לפעמים בטעות שתי תעודות
+    // מודפסות (20.9.2026: תעודת משלוח ולצידה תעודה שנייה צולמו כ"עמוד נוסף").
+    // המודל מחויב להחזיר תעודה אחת לכל קבוצה, ולכן עד כאן יכול היה רק להתריע
+    // במילים — והלקוח לא יכול היה לפעול על כך. כאן זה נאמר במבנה: העמוד שבו
+    // מתחילה כל תעודה נוספת ומספרה. שדות הסיכום נשארים של התעודה הראשונה.
+    separateDocuments: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["sourcePage", "docNumber"],
+        properties: { sourcePage: { type: "integer" }, docNumber: nullable("string") },
+      },
+    },
   },
 };
 
@@ -275,7 +289,8 @@ const SYSTEM_PROMPT = `אתה מפענח תעודות משלוח וחשבוני�
 11. אם חלק מהעמוד מטושטש, חלץ את השורות הקריאות והוסף אזהרה מפורשת לגבי החלק שלא נקרא. אל תמציא שורות ואל תדווח על אפס שורות כאשר נראית טבלת מוצרים שאינך מצליח לקרוא בביטחון.
 12. pageCount הוא מספר התמונות שסומנו עבור אותו noteIndex, לא מספר העמוד שמודפס על הנייר. sourcePage מתחיל ב-1 ומתייחס למיקום התמונה בתוך המסמך.
 13. confidence הוא ביטחון בקריאה מהצילום, לא ביטחון בכך שהחשבון מסתדר. ביטחון של שורה צריך לשקף את השדה הקריטי החלש ביותר בה.
-14. לפני הפלט בצע בדיקה פנימית שכל noteIndex הוחזר פעם אחת, שכל עמוד שויך למסמך הנכון, ושלא דילגת על שורת מוצר. השווה את סכום הכמויות ואת מספר השורות אל "סה"כ כללי" ו"סהכ שורות" המודפסים; אם אינם נסגרים — עבור שוב שורה-שורה, ואם עדיין לא — הוסף אזהרה. החזר רק את מבנה ה-JSON שנדרש.`;
+14. לפני הפלט בצע בדיקה פנימית שכל noteIndex הוחזר פעם אחת, שכל עמוד שויך למסמך הנכון, ושלא דילגת על שורת מוצר. השווה את סכום הכמויות ואת מספר השורות אל "סה"כ כללי" ו"סהכ שורות" המודפסים; אם אינם נסגרים — עבור שוב שורה-שורה, ואם עדיין לא — הוסף אזהרה. החזר רק את מבנה ה-JSON שנדרש.
+15. קבוצת תמונות אחת עשויה להכיל בטעות יותר מתעודה מודפסת אחת: עמוד עם כותרת, מספר תעודה ובלוק סיכום משלו, שאינו המשך של העמוד שלפניו. במקרה כזה אל תמזג את הסיכומים ואל תשמיט שורות: שדות הסיכום של המסמך (docNumber, docDate, totalUnits, printedLines, netToChargeExVat, vatAmountPrinted, totalToChargeInclVat) הם של התעודה הראשונה בקבוצה בלבד; חלץ את כל שורות המוצר מכל העמודים, עם sourcePage נכון לכל שורה; ורשום ב-separateDocuments, לכל תעודה נוספת, את העמוד שבו היא מתחילה (sourcePage) ואת מספרה המודפס (docNumber, או null אם אינו קריא). כשכל העמודים שייכים לאותה תעודה — separateDocuments הוא מערך ריק.`;
 
 const PROMO_SHEET_SYSTEM_PROMPT = `אתה מפענח את מכתב המבצעים התקופתי של מאפיית ברמן בעברית עבור חנות.
 המכתב הוא דף מודפס: לוגו ברמן, תאריך המכתב, כותרת ("הנדון: מבצע למוצרי קבוצת ברמן"),
@@ -315,6 +330,14 @@ export function validModelScan(scan, inputDocuments) {
       if (!finiteOrNull(doc[field])) return false;
     }
     if (!integerOrNull(doc.printedLines)) return false;
+    // SERVICE_VERSION 6. השדה נבדק כשהוא קיים; פלט של סכימה ישנה בלעדיו נשאר תקין.
+    if (doc.separateDocuments !== undefined) {
+      if (!Array.isArray(doc.separateDocuments)) return false;
+      for (const item of doc.separateDocuments) {
+        if (!item || typeof item !== "object" || !Number.isInteger(item.sourcePage) || item.sourcePage < 1 || item.sourcePage > input.pages.length) return false;
+        if (!stringOrNull(item.docNumber)) return false;
+      }
+    }
     for (const row of doc.rows) {
       if (!row || !Number.isInteger(row.sourcePage) || row.sourcePage < 1 || row.sourcePage > input.pages.length) return false;
       if (!integerOrNull(row.lineNumber)) return false;
@@ -343,6 +366,13 @@ export function validModelScan(scan, inputDocuments) {
 // עצמו: בלוק הסיכום שבתחתית התעודה מודפס בנפרד מהשורות, ולכן קריאה שגויה
 // של כמות או של שורה אינה מסתדרת מולו. אותה קריאה חוזרת, אותו ויתור —
 // רק עם מקור השוואה אחר.
+// העמוד שממנו מתחילה תעודה נוספת בתוך הקבוצה, לפי דיווח המודל — או null
+// כשכל העמודים שייכים לאותה תעודה. עמוד 1 הוא תמיד התעודה הראשונה.
+export function separateDocumentsFirstPage(doc) {
+  const pages = (Array.isArray(doc && doc.separateDocuments) ? doc.separateDocuments : [])
+    .map(item => item && Number(item.sourcePage)).filter(page => Number.isInteger(page) && page >= 2);
+  return pages.length ? Math.min(...pages) : null;
+}
 export function scanChecksumMismatches(scan, inputDocuments) {
   const out = [];
   for (const doc of (scan && scan.documents) || []) {
@@ -360,6 +390,11 @@ export function scanChecksumMismatches(scan, inputDocuments) {
     const fromPaper = typedUnits == null && typedLines == null;
     const expectUnits = typedUnits != null ? typedUnits : printedUnits;
     const expectLines = typedLines != null ? typedLines : printedLines;
+    // SERVICE_VERSION 6: המודל דיווח שבקבוצת התמונות יש יותר מתעודה אחת. שדות
+    // הסיכום הם של התעודה הראשונה בלבד, ולכן רק שורותיה נמדדות מולם; שורות
+    // התעודה הנוספת מוחזרות ללקוח, שמבקש לצלם אותה בכרטיס משלה. הדיווח מאמת
+    // את עצמו: אם הוא שגוי, שורות העמוד הראשון לבדן לא ייסגרו על הסיכום.
+    const firstExtraPage = separateDocumentsFirstPage(doc);
     // שורת פיקדון: הלקוח סופר יחידות בלעדיה ("בתעודה סכום היחידות אינו כולל
     // פיקדון" — index.html v173/v175), והשרת ספר אותה. תעודה תקינה עם בקבוקים
     // נכשלה כאן בכל קריאה, גם מושלמת. שתי המוסכמות מתקבלות עכשיו, כי קריאה
@@ -368,6 +403,7 @@ export function scanChecksumMismatches(scan, inputDocuments) {
     let depositUnits = 0;
     let gotLines = 0;
     for (const row of doc.rows || []) {
+      if (firstExtraPage != null && Number(row.sourcePage) >= firstExtraPage) continue;
       const quantity = Number.isFinite(row.quantity) ? row.quantity : 0;
       gotUnits += quantity;
       if (/פ.?קדון/.test(String((row && row.description) || ''))) depositUnits += quantity;
