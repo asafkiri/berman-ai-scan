@@ -1,7 +1,25 @@
 // Compare printed evidence only. Never use catalog prices to repair OCR.
+// SERVICE_VERSION 6: separateDocuments is part of the document's identity —
+// two reads that disagree on whether the group holds a second note must
+// escalate, or one read's false split would reach the client as 'agreed'.
 const documentFields = ['docNumber', 'docType', 'docDate', 'pageCount', 'totalUnits',
-  'printedLines', 'netToChargeExVat', 'vatAmountPrinted', 'totalToChargeInclVat'];
+  'printedLines', 'netToChargeExVat', 'vatAmountPrinted', 'totalToChargeInclVat', 'separateDocuments'];
 const rowFields = ['sourcePage', 'lineNumber', 'itemCode', 'barcode', 'quantity', 'unitPriceExVat'];
+
+// העמוד שממנו מתחילה תעודה נוספת בתוך הקבוצה, לפי דיווח המודל — או null
+// כשכל העמודים שייכים לאותה תעודה. עמוד 1 הוא תמיד התעודה הראשונה.
+export function separateDocumentsFirstPage(doc) {
+  const pages = (Array.isArray(doc && doc.separateDocuments) ? doc.separateDocuments : [])
+    .map(item => item && Number(item.sourcePage)).filter(page => Number.isInteger(page) && page >= 2);
+  return pages.length ? Math.min(...pages) : null;
+}
+// The rows of a reported extra note are returned to the client, which asks for
+// that note to be photographed on its own; nothing here verifies them, so their
+// confidence and cell-level issues must not buy a paid read or block the first note.
+function discardedRow(doc, row) {
+  const firstExtraPage = separateDocumentsFirstPage(doc);
+  return firstExtraPage != null && Number(row && row.sourcePage) >= firstExtraPage;
+}
 
 function normalized(field, value) {
   if (value == null) return null;
@@ -10,10 +28,15 @@ function normalized(field, value) {
     const m = /^(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{2}|\d{4})$/.exec(date);
     return m ? `${m[3].length === 2 ? '20' : ''}${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}` : date;
   }
+  if (field === 'separateDocuments') {
+    return JSON.stringify((Array.isArray(value) ? value : [])
+      .map(item => [Number(item && item.sourcePage), item && item.docNumber != null ? String(item.docNumber).trim() : null])
+      .sort((a, b) => a[0] - b[0]));
+  }
   return typeof value === 'string' ? value.trim() : value;
 }
 function orderedRows(doc) {
-  return (doc.rows || []).map((row, rowIndex) => ({ row, rowIndex })).sort((a, b) => {
+  return (doc.rows || []).map((row, rowIndex) => ({ row, rowIndex })).filter(entry => !discardedRow(doc, entry.row)).sort((a, b) => {
     const page = a.row.sourcePage - b.row.sourcePage;
     if (page) return page;
     if (a.row.lineNumber != null && b.row.lineNumber != null) return a.row.lineNumber - b.row.lineNumber;
@@ -57,6 +80,7 @@ export function inspectScan(scan, documents, checksum) {
       && Math.abs(Math.round(doc.netToChargeExVat * 100) + Math.round(doc.vatAmountPrinted * 100)
         - Math.round(doc.totalToChargeInclVat * 100)) > 2) issues.push(issue(doc, 'totals', 'inconsistent'));
     doc.rows.forEach((row, rowIndex) => {
+      if (discardedRow(doc, row)) return;
       const entry = { row, rowIndex };
       if (!row.itemCode && !row.barcode) issues.push(issue(doc, 'identity', 'unreadable', entry));
       if (!(row.quantity > 0)) issues.push(issue(doc, 'quantity', 'unreadable', entry));
@@ -79,7 +103,8 @@ export function totalUsage(reads) {
 export function verificationPrompt(targets = []) {
   const fields = { unitPriceExVat: 'מחיר היחידה', quantity: 'הכמות', itemCode: 'קוד הפריט', barcode: 'הברקוד',
     totalUnits: 'סך היחידות', printedLines: 'מספר השורות', netToChargeExVat: 'נטו לחיוב',
-    totals: 'שלוש שורות הסכומים', docDate: 'תאריך התעודה', docNumber: 'מספר התעודה' };
+    totals: 'שלוש שורות הסכומים', docDate: 'תאריך התעודה', docNumber: 'מספר התעודה',
+    separateDocuments: 'האם הצילומים מכילים יותר מתעודה מודפסת אחת (כותרת, מספר תעודה ובלוק סיכום נפרדים), ומאיזה עמוד' };
   const locations = targets.slice(0, 50).map(t => `מסמך ${t.noteIndex + 1}`
     + (t.sourcePage ? ` עמוד ${t.sourcePage}` : '') + (t.lineNumber != null ? ` שורה מודפסת ${t.lineNumber}` : '')
     + ': ' + (fields[t.field] || 'קריאת השדות המודפסים')).join('; ');

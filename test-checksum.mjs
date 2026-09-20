@@ -6,7 +6,7 @@
 // נייר. הבדיקות מוודאות גם שההתנהגות הישנה — עם עוגן מוקלד — לא זזה.
 import crypto from "node:crypto";
 import { Readable } from "node:stream";
-import { scanChecksumMismatches, validModelScan, createServer } from "./server.js";
+import { scanChecksumMismatches, validModelScan, createServer, separateDocumentsFirstPage } from "./server.js";
 
 let pass = 0;
 let fail = 0;
@@ -114,9 +114,12 @@ check("דיווח שגוי על פיצול נתפס — העמוד הראשון 
 check("תעודה של שני עמודים בלי דיווח נמדדת על שני העמודים",
   scanChecksumMismatches(scan(doc(ROWS.slice(0, 3).concat(ROWS.slice(3).map(r => ({ ...r, sourcePage: 2 }))), { pageCount: 2, separateDocuments: [] })), twoPages).length === 0);
 check("עמוד מחוץ לטווח נדחה", !validModelScan(scan(doc(ROWS, { separateDocuments: [{ sourcePage: 3, docNumber: null }] })), twoPages));
+check("עמוד 1 אינו תעודה נוספת — נדחה", !validModelScan(scan(doc(ROWS, { separateDocuments: [{ sourcePage: 1, docNumber: null }] })), twoPages));
+check("עמוד שדווח פעמיים נדחה", !validModelScan(scan(doc(ROWS, { pageCount: 2, separateDocuments: [{ sourcePage: 2, docNumber: "1" }, { sourcePage: 2, docNumber: "2" }] })), twoPages));
 check("מספר תעודה שאינו מחרוזת נדחה", !validModelScan(scan(doc(ROWS, { separateDocuments: [{ sourcePage: 2, docNumber: 290094585 }] })), twoPages));
 check("מבנה שאינו מערך נדחה", !validModelScan(scan(doc(ROWS, { separateDocuments: { sourcePage: 2 } })), twoPages));
 check("פלט בלי השדה (סכימה ישנה) עדיין תקין", validModelScan(scan(doc(ROWS)), [{ noteIndex: 0, pages: ["image"] }]));
+check("separateDocumentsFirstPage מיוצא מהשרת כמו קודם", separateDocumentsFirstPage(twoNotes) === 2 && separateDocumentsFirstPage(doc(ROWS)) === null);
 
 section("[9] מסלול הבקשה המלא בזיכרון — בלי פתיחת חיבור רשת");
 const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });

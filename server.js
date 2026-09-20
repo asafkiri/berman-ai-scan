@@ -14,7 +14,8 @@
 // by this service.
 
 import http from "node:http";
-import { runVerifiedScan } from "./scan-verification.js";
+import { runVerifiedScan, separateDocumentsFirstPage } from "./scan-verification.js";
+export { separateDocumentsFirstPage };
 import crypto from "node:crypto";
 import { pathToFileURL } from "node:url";
 
@@ -331,11 +332,15 @@ export function validModelScan(scan, inputDocuments) {
     }
     if (!integerOrNull(doc.printedLines)) return false;
     // SERVICE_VERSION 6. השדה נבדק כשהוא קיים; פלט של סכימה ישנה בלעדיו נשאר תקין.
+    // תעודה נוספת מתחילה מעמוד 2 ואילך (עמוד 1 הוא תמיד התעודה הראשונה), וכל
+    // עמוד פעם אחת — דיווח אחר סותר את כלל 15 ונדחה כמו כל פלט לא תקין.
     if (doc.separateDocuments !== undefined) {
       if (!Array.isArray(doc.separateDocuments)) return false;
+      const reportedPages = new Set();
       for (const item of doc.separateDocuments) {
-        if (!item || typeof item !== "object" || !Number.isInteger(item.sourcePage) || item.sourcePage < 1 || item.sourcePage > input.pages.length) return false;
-        if (!stringOrNull(item.docNumber)) return false;
+        if (!item || typeof item !== "object" || !Number.isInteger(item.sourcePage) || item.sourcePage < 2 || item.sourcePage > input.pages.length) return false;
+        if (!stringOrNull(item.docNumber) || reportedPages.has(item.sourcePage)) return false;
+        reportedPages.add(item.sourcePage);
       }
     }
     for (const row of doc.rows) {
@@ -366,13 +371,6 @@ export function validModelScan(scan, inputDocuments) {
 // עצמו: בלוק הסיכום שבתחתית התעודה מודפס בנפרד מהשורות, ולכן קריאה שגויה
 // של כמות או של שורה אינה מסתדרת מולו. אותה קריאה חוזרת, אותו ויתור —
 // רק עם מקור השוואה אחר.
-// העמוד שממנו מתחילה תעודה נוספת בתוך הקבוצה, לפי דיווח המודל — או null
-// כשכל העמודים שייכים לאותה תעודה. עמוד 1 הוא תמיד התעודה הראשונה.
-export function separateDocumentsFirstPage(doc) {
-  const pages = (Array.isArray(doc && doc.separateDocuments) ? doc.separateDocuments : [])
-    .map(item => item && Number(item.sourcePage)).filter(page => Number.isInteger(page) && page >= 2);
-  return pages.length ? Math.min(...pages) : null;
-}
 export function scanChecksumMismatches(scan, inputDocuments) {
   const out = [];
   for (const doc of (scan && scan.documents) || []) {

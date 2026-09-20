@@ -212,3 +212,36 @@ test('a real quantity misread is still caught on a note that has a deposit line'
   scan.documents[0].rows[0].quantity = 6;
   assert.deepEqual(inspectScan(scan, documents, scanChecksumMismatches).map(i => i.field), ['totalUnits']);
 });
+
+// ===== SERVICE_VERSION 6: תעודה שנייה בתוך קבוצת תמונות אחת =====
+// 20.9.2026: שתי תעודות של אותו משלוח צולמו ככרטיס אחד. המודל מדווח על כך
+// במבנה; שורות התעודה הנוספת מוחזרות ללקוח אך אינן מאומתות — הן יצולמו מחדש.
+const twoPageDocs = [{ noteIndex: 0, pages: ['p1', 'p2'] }];
+function merged(report = [{ sourcePage: 2, docNumber: '290094585' }], extraConfidence = .72) {
+  const scan = paper(); scan.documents[0].pageCount = 2; scan.documents[0].separateDocuments = report;
+  scan.documents[0].rows.push({ sourcePage: 2, lineNumber: 1, itemCode: '238', barcode: '497204',
+    description: 'ברמן אסלי 5 פי', quantity: 8, unitPriceExVat: 7.95, confidence: extraConfidence });
+  return scan;
+}
+test('a correctly reported second note costs no verification read, whatever its own rows look like', async () => {
+  assert.deepEqual(inspectScan(merged(), twoPageDocs, scanChecksumMismatches), []);
+  const unreadable = merged(); Object.assign(unreadable.documents[0].rows[2], { itemCode: null, barcode: null, unitPriceExVat: null });
+  assert.deepEqual(inspectScan(unreadable, twoPageDocs, scanChecksumMismatches), []);
+  const value = await run([result(merged()), result(merged())], { documents: twoPageDocs });
+  assert.equal(value.verification.status, 'agreed');
+  assert.equal(value.calls.length, 2);
+});
+test('reads that disagree on whether the group holds a second note escalate', async () => {
+  // הקריאה שמדווחת מודדת רק את שורות התעודה הראשונה, השנייה — את כולן: גם השורות נבדלות.
+  assert.deepEqual(compareScans(merged(), merged([])).map(i => i.field), ['separateDocuments', 'rows']);
+  assert.deepEqual(compareScans(merged(), merged([{ sourcePage: 2, docNumber: '290094586' }])).map(i => i.field), ['separateDocuments']);
+  assert.deepEqual(compareScans(merged(), merged()), []);
+  const value = await run([result(merged()), result(merged([])), result(merged(), 'terra')], { documents: twoPageDocs });
+  assert.equal(value.calls.length, 3);
+  assert.equal(value.verification.status, 'verified');
+});
+test('a wrong report on a page that carries product rows still fails the checksum', () => {
+  const scan = paper(); scan.documents[0].pageCount = 2; scan.documents[0].rows[1].sourcePage = 2;
+  scan.documents[0].separateDocuments = [{ sourcePage: 2, docNumber: null }];
+  assert.deepEqual(inspectScan(scan, twoPageDocs, scanChecksumMismatches).map(i => i.field).sort(), ['printedLines', 'totalUnits']);
+});
