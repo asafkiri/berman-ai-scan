@@ -266,3 +266,54 @@ test('the trigger list is capped, but the summary counts every distinct trigger'
   assert.equal(out.moneyOnly, true);
   assert.deepEqual(escalationTriggers([]), { triggers: [], triggerSummary: {}, moneyOnly: false, triggersTruncated: false });
 });
+test('v7: two cheap reads that agree the photo is not a driver strip do not pay for a stronger read', async () => {
+  const a4 = () => ({ warnings: [], documents: [{ noteIndex: 0, docNumber: null, docType: 'unknown', docDate: null, pageCount: 1,
+    totalUnits: null, printedLines: null, netToChargeExVat: null, vatAmountPrinted: null, totalToChargeInclVat: null,
+    notDriverStrip: true, confidence: .9, warnings: [], rows: [] }] });
+  const value = await run([result(a4()), result(a4())]);
+  assert.equal(value.calls.length, 2);
+  assert.equal(value.verification.escalationAttempted, false);
+  assert.equal(value.verification.notDriverStrip, true);
+  assert.equal(value.verification.status, 'needs_review');
+  const strip = paper(); strip.documents[0].notDriverStrip = false;
+  const normal = await run([result(strip), result(strip)]);
+  assert.equal(normal.verification.status, 'agreed');
+  assert.ok(!('notDriverStrip' in normal.verification));
+});
+test('v7: the A4 skip needs both reads, and every document of the request, to be an empty non-strip page', async () => {
+  const a4doc = (noteIndex = 0) => ({ noteIndex, docNumber: null, docType: 'unknown', docDate: null, pageCount: 1, totalUnits: null, printedLines: null,
+    netToChargeExVat: null, vatAmountPrinted: null, totalToChargeInclVat: null, notDriverStrip: true, confidence: .9, warnings: [], rows: [] });
+  // one cheap read failed: a single "not a strip" read is not enough to skip the paid read
+  const failed = await run([{ fail: { status: 502, body: { ok: false, error: 'invalid_model_output' } } }, result({ warnings: [], documents: [a4doc()] }), result(paper(), 'terra')]);
+  assert.equal(failed.calls.length, 3);
+  assert.ok(!('notDriverStrip' in failed.verification));
+  // a two-document request: one A4 page and one strip — the strip still gets its paid read when disputed
+  const strip = paper().documents[0], other = { ...strip, noteIndex: 1, rows: strip.rows.map(r => ({ ...r, quantity: r.quantity + 1 })) };
+  const docs2 = [{ noteIndex: 0, pages: ['a'] }, { noteIndex: 1, pages: ['b'] }];
+  const two = await runVerifiedScan({ documents: docs2, checksum: scanChecksumMismatches,
+    attemptScan: (() => { const outs = [result({ warnings: [], documents: [a4doc(0), { ...strip, noteIndex: 1 }] }), result({ warnings: [], documents: [a4doc(0), other] }),
+      result({ warnings: [], documents: [a4doc(0), { ...strip, noteIndex: 1 }] }, 'terra')]; return async () => outs.shift(); })() });
+  assert.equal(two.reads.length, 3);
+  assert.ok(!two.verification.notDriverStrip);
+});
+test('v7: the skip conditions are each required (flag, unknown, no rows, both reads)', async () => {
+  const a4doc = o => ({ noteIndex: 0, docNumber: null, docType: 'unknown', docDate: null, pageCount: 1, totalUnits: null, printedLines: null,
+    netToChargeExVat: null, vatAmountPrinted: null, totalToChargeInclVat: null, notDriverStrip: true, confidence: .9, warnings: [], rows: [], ...o });
+  const pair = (a, b) => [result({ warnings: [], documents: [a] }), result({ warnings: [], documents: [b] }), result(paper(), 'terra')];
+  const row = paper().documents[0].rows[0];
+  // flagged + unknown + rows that disagree → the stronger read runs
+  let v = await run(pair(a4doc({ rows: [row] }), a4doc({ rows: [{ ...row, quantity: row.quantity + 1 }] })));
+  assert.equal(v.calls.length, 3, 'rows present');
+  // flagged + invoice + 0 rows → the stronger read runs
+  v = await run(pair(a4doc({ docType: 'invoice' }), a4doc({ docType: 'invoice' })));
+  assert.equal(v.calls.length, 3, 'docType invoice');
+  // unknown + 0 rows but no flag → the stronger read runs
+  v = await run(pair(a4doc({ notDriverStrip: undefined }), a4doc({ notDriverStrip: undefined })));
+  assert.equal(v.calls.length, 3, 'flag missing');
+  // an honest A4 pair that disagrees on docDate still reports it, once
+  v = await run(pair(a4doc({ docDate: '01/10/2026' }), a4doc({ docDate: '02/10/2026' })));
+  assert.equal(v.calls.length, 2);
+  assert.ok(v.verification.issues.some(i => i.field === 'docDate' && i.reason === 'disagreement'));
+  const keys = v.verification.issues.map(i => JSON.stringify(i));
+  assert.equal(new Set(keys).size, keys.length, 'no duplicated issues');
+});
