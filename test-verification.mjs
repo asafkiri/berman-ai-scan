@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { compareScans, inspectScan, runVerifiedScan } from './scan-verification.js';
+import { compareScans, inspectScan, runVerifiedScan, escalationTriggers } from './scan-verification.js';
 import { scanChecksumMismatches } from './server.js';
 
 const documents = [{ noteIndex: 0, pages: ['original-photo'] }];
@@ -211,4 +211,54 @@ test('a real quantity misread is still caught on a note that has a deposit line'
   scan.documents[0].printedLines = 3;
   scan.documents[0].rows[0].quantity = 6;
   assert.deepEqual(inspectScan(scan, documents, scanChecksumMismatches).map(i => i.field), ['totalUnits']);
+});
+
+// ===== v6: מה הפעיל את הקריאה השלישית =====
+// התשובה שומרת את הסוגיות שגרמו לקריאה החזקה (בתשלום), ולא רק את מה שנשאר פתוח
+// אחריה. moneyOnly מסמן קריאה שהפעילו רק שדות כסף — המחיר המודפס, נטו, מע"מ,
+// סה"כ — שהלקוח כבר אינו משתמש בהם להכרעה.
+test('a price-only disagreement records the price field as the trigger and marks it money-only', async () => {
+  const wrong = paper(); wrong.documents[0].rows[1].unitPriceExVat = 14.84;
+  const value = await run([result(wrong), result(paper()), result(paper(), 'terra')]);
+  assert.deepEqual(value.verification.triggers, [{ noteIndex: 0, field: 'unitPriceExVat', reason: 'disagreement', rowIndex: 1, sourcePage: 1, lineNumber: 12 }]);
+  assert.deepEqual(value.verification.triggerSummary, { 'disagreement:unitPriceExVat': 1 });
+  assert.equal(value.verification.moneyOnly, true);
+  assert.equal(value.verification.triggersTruncated, false);
+  assert.deepEqual(value.verification.issues, [], 'issues is still only what is open after the read');
+});
+test('a code disagreement, or a low-confidence row, is not money-only', async () => {
+  const code = paper(); code.documents[0].rows[0].itemCode = '1232';
+  const a = await run([result(code), result(paper()), result(paper(), 'terra')]);
+  assert.deepEqual(a.verification.triggerSummary, { 'disagreement:itemCode': 1 });
+  assert.equal(a.verification.moneyOnly, false);
+  const low = paper(); low.documents[0].rows[0].confidence = .5;
+  const b = await run([result(low), result(paper()), result(paper(), 'terra')]);
+  assert.deepEqual(b.verification.triggerSummary, { 'low_confidence:row': 1 });
+  assert.equal(b.verification.moneyOnly, false);
+  const both = paper(); both.documents[0].rows[1].unitPriceExVat = 14.84; both.documents[0].rows[0].quantity = 9; both.documents[0].totalUnits = 11;
+  const c = await run([result(both), result(paper()), result(paper(), 'terra')]);
+  assert.equal(c.verification.moneyOnly, false, 'a price plus a quantity is not money-only');
+  assert.equal(c.verification.triggerSummary['disagreement:unitPriceExVat'], 1);
+  assert.equal(c.verification.triggerSummary['disagreement:quantity'], 1);
+});
+test('two agreeing cheap reads record no triggers', async () => {
+  const value = await run([result(paper()), result(paper())]);
+  assert.equal(value.verification.escalationAttempted, false);
+  assert.ok(!('triggers' in value.verification) && !('moneyOnly' in value.verification));
+});
+test('a client-requested verification records its targets as the trigger', async () => {
+  const value = await run([result(paper(), 'terra')], { verificationOnly: true,
+    targets: [{ noteIndex: 0, sourcePage: 1, lineNumber: 12, field: 'itemCode' }] });
+  assert.deepEqual(value.verification.triggers, [{ noteIndex: 0, field: 'itemCode', reason: 'client_request', sourcePage: 1, lineNumber: 12 }]);
+  assert.equal(value.verification.moneyOnly, false);
+});
+test('the trigger list is capped, but the summary counts every distinct trigger', () => {
+  const issues = Array.from({ length: 75 }, (_, i) => ({ noteIndex: 0, field: 'unitPriceExVat', reason: 'disagreement', rowIndex: i }));
+  issues.push(issues[0]);
+  const out = escalationTriggers(issues);
+  assert.equal(out.triggers.length, 60);
+  assert.equal(out.triggersTruncated, true);
+  assert.deepEqual(out.triggerSummary, { 'disagreement:unitPriceExVat': 75 }, 'duplicates count once');
+  assert.equal(out.moneyOnly, true);
+  assert.deepEqual(escalationTriggers([]), { triggers: [], triggerSummary: {}, moneyOnly: false, triggersTruncated: false });
 });

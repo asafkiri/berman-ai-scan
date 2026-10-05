@@ -10,6 +10,24 @@ npm test     # בדיקות עוגן הביקורת
 
 ## עוגן הביקורת
 
+### SERVICE_VERSION 6 — מה הפעיל את הקריאה השלישית
+
+כשהשרת מפעיל את קריאת האימות החזקה (בתשלום), `verification` בתשובה כולל גם
+מה הפעיל אותה — לא רק מה שנשאר פתוח אחריה (`issues`):
+
+- `triggers` — הסוגיות שגרמו לקריאה: `{noteIndex, field, reason, rowIndex?, sourcePage?, lineNumber?}`, עד 60 (`triggersTruncated` כשנחתך).
+- `triggerSummary` — ספירה לפי `reason:field`, למשל `{"disagreement:unitPriceExVat": 2, "low_confidence:row": 1}`.
+- `moneyOnly` — `true` כשרק שדות כסף הפעילו את הקריאה (`unitPriceExVat`, `netToChargeExVat`, `vatAmountPrinted`, `totalToChargeInclVat`, `totals`). האפליקציה כבר אינה מכריעה דבר לפי כסף מהנייר (v121–v124), ולכן אלה הקריאות שקריאת המחירים עולה.
+- בקשת `mode: "verify"` של הלקוח נרשמת עם `reason: "client_request"` ושדות היעד שלה.
+
+בלי הסלמה (שתי קריאות שהסכימו) השדות אינם מופיעים. האפליקציה שומרת את אובייקט
+`verification` כמו שהוא עם התעודה (`paperScan.response`), ולכן אחרי שבוע-שבועיים
+של צילומים אפשר לספור מהגיבוי כמה קריאות שלישיות נגרמו רק ממחירים — ולהחליט לפי זה
+אם להפסיק לקרוא אותם. בנוסף, כל קריאה שלישית כותבת שורת יומן אחת ב-Cloud Run
+(`message: "scan_escalation"`, עם `moneyOnly`, `triggerSummary`, `mode`, `status`) —
+שמות שדות וספירות בלבד, בלי תמונה, בלי מספר תעודה ובלי מספרים מהנייר. ההתנהגות
+עצמה, מספר הקריאות והתקציב לא השתנו.
+
 ### SERVICE_VERSION 5 — שתי קריאות ואימות נוסף
 
 כל בקשת סריקת תעודה מפעילה שתי קריאות עצמאיות במקביל במודל הראשי
