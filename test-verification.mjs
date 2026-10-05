@@ -248,8 +248,12 @@ test('two agreeing cheap reads record no triggers', async () => {
 });
 test('a client-requested verification records its targets as the trigger', async () => {
   const value = await run([result(paper(), 'terra')], { verificationOnly: true,
-    targets: [{ noteIndex: 0, sourcePage: 1, lineNumber: 12, field: 'itemCode' }] });
-  assert.deepEqual(value.verification.triggers, [{ noteIndex: 0, field: 'itemCode', reason: 'client_request', sourcePage: 1, lineNumber: 12 }]);
+    targets: [{ noteIndex: 0, sourcePage: 1, lineNumber: 12, field: 'itemCode' },
+      { noteIndex: 0, sourcePage: 1, lineNumber: 13, field: 'quantity', reason: 'disagreement', rowIndex: 4 }] });
+  assert.deepEqual(value.verification.triggers, [
+    { noteIndex: 0, field: 'itemCode', reason: 'client_request', sourcePage: 1, lineNumber: 12 },
+    { noteIndex: 0, field: 'quantity', reason: 'client_request', sourcePage: 1, lineNumber: 13 }], 'the client cannot relabel or add fields');
+  assert.deepEqual(value.verification.triggerSummary, { 'client_request:itemCode': 1, 'client_request:quantity': 1 });
   assert.equal(value.verification.moneyOnly, false);
 });
 test('the trigger list is capped, but the summary counts every distinct trigger', () => {

@@ -180,7 +180,10 @@ export async function runVerifiedScan({ attemptScan, documents, checksum, verifi
   let selected, issues = [], escalationAttempted = verificationOnly, agreementScans = [], escalation = null;
   if (verificationOnly) {
     // The client asked for this read itself; its targets are the trigger.
-    escalation = escalationTriggers((targets || []).map(t => ({ ...t, reason: 'client_request' })));
+    // Only the validated target fields are recorded; anything else on a target
+    // (a reason, a rowIndex) is the client's own text and is not echoed back.
+    escalation = escalationTriggers((targets || []).map(t => t && ({ noteIndex: t.noteIndex, field: t.field,
+      sourcePage: t.sourcePage, lineNumber: t.lineNumber, reason: 'client_request' })));
     selected = await read(true);
   }
   else {

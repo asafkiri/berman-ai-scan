@@ -18,10 +18,10 @@ npm test     # בדיקות עוגן הביקורת
 - `triggers` — הסוגיות שגרמו לקריאה: `{noteIndex, field, reason, rowIndex?, sourcePage?, lineNumber?}`, עד 60 (`triggersTruncated` כשנחתך).
 - `triggerSummary` — ספירה לפי `reason:field`, למשל `{"disagreement:unitPriceExVat": 2, "low_confidence:row": 1}`.
 - `moneyOnly` — `true` כשרק שדות כסף הפעילו את הקריאה (`unitPriceExVat`, `netToChargeExVat`, `vatAmountPrinted`, `totalToChargeInclVat`, `totals`). האפליקציה כבר אינה מכריעה דבר לפי כסף מהנייר (v121–v124), ולכן אלה הקריאות שקריאת המחירים עולה.
-- בקשת `mode: "verify"` של הלקוח נרשמת עם `reason: "client_request"` ושדות היעד שלה.
+- בקשת `mode: "verify"` של הלקוח נרשמת עם `reason: "client_request"` ושדות היעד שאומתו בלבד (`noteIndex`, `field`, `sourcePage`, `lineNumber`). האפליקציה מבקשת אימות כזה רק לקוד פריט או לכמות, ואם האימות שלה לא הסתיים ב-`verified` היא שומרת אובייקט משלה — אז הרישום הזה נשמר רק בשורת היומן (`mode: "verify"`).
 
 בלי הסלמה (שתי קריאות שהסכימו) השדות אינם מופיעים. האפליקציה שומרת את אובייקט
-`verification` כמו שהוא עם התעודה (`paperScan.response`), ולכן אחרי שבוע-שבועיים
+`verification` של הסריקה עם התעודה (`paperScan.response`), ולכן אחרי שבוע-שבועיים
 של צילומים אפשר לספור מהגיבוי כמה קריאות שלישיות נגרמו רק ממחירים — ולהחליט לפי זה
 אם להפסיק לקרוא אותם. בנוסף, כל קריאה שלישית כותבת שורת יומן אחת ב-Cloud Run
 (`message: "scan_escalation"`, עם `moneyOnly`, `triggerSummary`, `mode`, `status`) —
