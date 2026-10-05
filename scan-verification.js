@@ -177,7 +177,7 @@ export async function runVerifiedScan({ attemptScan, documents, checksum, verifi
       usage: result.data?.usage || null, escalation: escalate, error: result.fail?.body?.error || null });
     return result;
   };
-  let selected, issues = [], escalationAttempted = verificationOnly, agreementScans = [], escalation = null;
+  let selected, issues = [], escalationAttempted = verificationOnly, agreementScans = [], escalation = null, notDriverStrip = false;
   if (verificationOnly) {
     // The client asked for this read itself; its targets are the trigger.
     // Only the validated target fields are recorded; anything else on a target
@@ -193,7 +193,12 @@ export async function runVerifiedScan({ attemptScan, documents, checksum, verifi
     if (good.length === 2) { issues.push(...compareScans(good[0].scan, good[1].scan)); agreementScans = good.map(r => r.scan); }
     else issues.push({ noteIndex: 0, field: 'document', reason: 'read_failed' });
     for (const result of good) issues.push(...inspectScan(result.scan, documents, checksum));
-    if (issues.length) {
+    // v7: both cheap reads say the photo is not a driver strip at all (an A4 invoice,
+    // a promo letter). A stronger read cannot turn it into one, so it is not paid for;
+    // the issues still reach the client and the result stays needs_review.
+    notDriverStrip = good.length === 2 && good.every(r => (r.scan.documents || []).length > 0
+      && r.scan.documents.every(d => d.notDriverStrip === true));
+    if (issues.length && !notDriverStrip) {
       targets = issues;
       escalationAttempted = true;
       escalation = escalationTriggers(issues);
@@ -214,5 +219,5 @@ export async function runVerifiedScan({ attemptScan, documents, checksum, verifi
   return { selected, verification: { version: 1, status, primaryReads: verificationOnly ? 0 : 2,
     escalationAttempted, reasons: [...new Set(issues.map(i => i.reason))], issues: evidenced,
     agreementCleared: remaining.length - evidenced.length,
-    readCount: reads.length, ...(escalation || {}) }, reads, usage: totalUsage(reads) };
+    readCount: reads.length, ...(notDriverStrip ? { notDriverStrip: true } : {}), ...(escalation || {}) }, reads, usage: totalUsage(reads) };
 }

@@ -59,7 +59,7 @@ const OPENAI_IMAGE_DETAIL = "original";
 const OPENAI_REASONING_EFFORT = "medium";
 const OPENAI_MAX_OUTPUT_TOKENS = 48_000;
 const OPENAI_TIMEOUT_MS = 180_000;
-const SERVICE_VERSION = 6; // two independent reads + one bounded verification; v6 records what triggered it
+const SERVICE_VERSION = 7; // two independent reads + one bounded verification; v6 records what triggered it; v7 reads the paper's header and control numbers
 // עוגן היחידות: כמות יכולה להיות עשרונית רק בטעות קריאה; ההשוואה בסבילות אפס מעשית.
 const CHECKSUM_UNITS_TOLERANCE = 0.001;
 const FIREBASE_PROJECT_ID = "berman-marketkiri";
@@ -98,6 +98,8 @@ const documentSchema = {
     "noteIndex", "docNumber", "docType", "docDate", "pageCount",
     "totalUnits", "printedLines", "netToChargeExVat",
     "vatAmountPrinted", "totalToChargeInclVat",
+    "headerText", "internalNumber", "numerator", "printedCheck",
+    "otherPapersVisible", "notDriverStrip",
     "confidence", "warnings", "rows",
   ],
   properties: {
@@ -115,6 +117,16 @@ const documentSchema = {
     // לחנות איזו שורה נלקחה בטעות במקום לנחש לפי יחס.
     vatAmountPrinted: nullable("number"),
     totalToChargeInclVat: nullable("number"),
+    // v7: מה שמודפס על הנייר עצמו כדי לזהות אותו — בלי שום חישוב. הכותרת מבדילה
+    // תעודת משלוח מנייר חיוב קצר ("ת.משלוח") ומהחזרה; "מספר תעודה פנימי" ו"נומרטור"
+    // הם המספר הרץ של המסופון; "ביקורת" היא ספרת בקרה על זהות השורות (סכום שתי
+    // הספרות האחרונות של כל ברקוד). הלקוח בודק אותם; השרת רק קורא נאמנה.
+    headerText: nullable("string"),
+    internalNumber: nullable("string"),
+    numerator: nullable("string"),
+    printedCheck: nullable("integer"),
+    otherPapersVisible: { type: "boolean" },
+    notDriverStrip: { type: "boolean" },
     confidence: { type: "number" },
     warnings: { type: "array", items: { type: "string" } },
     rows: { type: "array", items: rowSchema },
@@ -254,6 +266,10 @@ const SYSTEM_PROMPT = `אתה מפענח תעודות משלוח וחשבוני�
 ותעודות זיכוי שבהן הנהג מבטל חיוב שנרשם באותו משלוח. שתיהן מודפסות באותו מבנה בדיוק
 כמו תעודת משלוח — אותה טבלה ואותו בלוק סיכום — וקוראים אותן באותו אופן בדיוק.
 ההבדל היחיד הוא הכותרת, והוא מדווח בשדה docType. אל תדלג על מסמך כזה ואל תחזיר אותו ריק.
+מאותו מסופון יוצאים גם ניירות קצרים (נבדקו על נייר אמיתי): נייר חיוב שכותרתו "ת.משלוח"
+ותעודת החזרה שכותרתה "ת.משלוח החזרה יבש". הם באותו מבנה בדיוק, ונייר עם שורה אחת או
+שתיים הוא תקין לגמרי — קרא אותו כרגיל, עם אותו בלוק סיכום. בניירות כאלה "מספר תעודה פנימי"
+בתחתית נשאר לרוב ריק; בתעודת משלוח הוא מודפס כאות N ואחריה ספרות.
 
 סדר עבודה מחייב לפני הפלט:
 א. לכל תמונה קבע תחילה את כיוון הקריאה הנכון. המסמך עשוי להיות מסובב ב-0°, 90°, 180° או 270°. קרא אותו כאילו סובב לכיוון הנכון לפני חילוץ נתונים. אל תחזיר מסמך ריק רק מפני שהטקסט מצולם על הצד.
@@ -275,7 +291,10 @@ const SYSTEM_PROMPT = `אתה מפענח תעודות משלוח וחשבוני�
 11. אם חלק מהעמוד מטושטש, חלץ את השורות הקריאות והוסף אזהרה מפורשת לגבי החלק שלא נקרא. אל תמציא שורות ואל תדווח על אפס שורות כאשר נראית טבלת מוצרים שאינך מצליח לקרוא בביטחון.
 12. pageCount הוא מספר התמונות שסומנו עבור אותו noteIndex, לא מספר העמוד שמודפס על הנייר. sourcePage מתחיל ב-1 ומתייחס למיקום התמונה בתוך המסמך.
 13. confidence הוא ביטחון בקריאה מהצילום, לא ביטחון בכך שהחשבון מסתדר. ביטחון של שורה צריך לשקף את השדה הקריטי החלש ביותר בה.
-14. לפני הפלט בצע בדיקה פנימית שכל noteIndex הוחזר פעם אחת, שכל עמוד שויך למסמך הנכון, ושלא דילגת על שורת מוצר. השווה את סכום הכמויות ואת מספר השורות אל "סה"כ כללי" ו"סהכ שורות" המודפסים; אם אינם נסגרים — עבור שוב שורה-שורה, ואם עדיין לא — הוסף אזהרה. החזר רק את מבנה ה-JSON שנדרש.`;
+14. לפני הפלט בצע בדיקה פנימית שכל noteIndex הוחזר פעם אחת, שכל עמוד שויך למסמך הנכון, ושלא דילגת על שורת מוצר. השווה את סכום הכמויות ואת מספר השורות אל "סה"כ כללי" ו"סהכ שורות" המודפסים; אם אינם נסגרים — עבור שוב שורה-שורה, ואם עדיין לא — הוסף אזהרה. החזר רק את מבנה ה-JSON שנדרש.
+15. headerText היא כותרת סוג המסמך כפי שהיא מודפסת מעל מספר התעודה (למשל "תעודת משלוח", "ת.משלוח", "ת.משלוח החזרה יבש"), בלי מילים נוספות; null אם אינה קריאה. internalNumber הוא הספרות של "מספר תעודה פנימי" בתחתית, בלי האות N שלפניהן; numerator הוא המספר של "נומרטור"; printedCheck הוא המספר של "ביקורת:". שלושתם מוחזרים בדיוק כפי שמודפסים, ו-null כשהם ריקים או לא קריאים. אלה מספרי בקרה בלבד: לעולם אל תשתמש באחד מהם כ-totalUnits או כ-docNumber, ואל תחשב אותם בעצמך.
+16. otherPapersVisible הוא true רק אם בתמונה נראה נייר שלם נוסף מלבד המסמך שנקרא — עם כותרת משלו או בלוק סיכום משלו. קצה קרוע או חלק עליון או תחתון של נייר שכן אינם נחשבים. קרא תמיד רק את המסמך המרכזי, אל תערבב שורות משני ניירות, והוסף אזהרה כשהערך true.
+17. notDriverStrip הוא true אם הצילום אינו סרט הדפסה של מסופון הנהג כלל — למשל חשבונית מס חודשית בדף A4, מכתב מבצעים או מסמך אחר. במקרה כזה החזר docType "unknown", rows ריק ושדות הסיכום null, והוסף אזהרה. בכל נייר של המסופון (תעודת משלוח, ת.משלוח, החזרה, זיכוי) הערך false.`;
 
 const PROMO_SHEET_SYSTEM_PROMPT = `אתה מפענח את מכתב המבצעים התקופתי של מאפיית ברמן בעברית עבור חנות.
 המכתב הוא דף מודפס: לוגו ברמן, תאריך המכתב, כותרת ("הנדון: מבצע למוצרי קבוצת ברמן"),
@@ -315,6 +334,15 @@ export function validModelScan(scan, inputDocuments) {
       if (!finiteOrNull(doc[field])) return false;
     }
     if (!integerOrNull(doc.printedLines)) return false;
+    // v7 fields: a fake or older model output without them is still a valid scan.
+    if (doc.headerText !== undefined && !stringOrNull(doc.headerText)) return false;
+    for (const field of ["internalNumber", "numerator"]) {
+      if (doc[field] !== undefined && doc[field] !== null && (typeof doc[field] !== "string" || !/^\d{1,12}$/.test(doc[field]))) return false;
+    }
+    if (doc.printedCheck !== undefined && !integerOrNull(doc.printedCheck)) return false;
+    for (const field of ["otherPapersVisible", "notDriverStrip"]) {
+      if (doc[field] !== undefined && typeof doc[field] !== "boolean") return false;
+    }
     for (const row of doc.rows) {
       if (!row || !Number.isInteger(row.sourcePage) || row.sourcePage < 1 || row.sourcePage > input.pages.length) return false;
       if (!integerOrNull(row.lineNumber)) return false;

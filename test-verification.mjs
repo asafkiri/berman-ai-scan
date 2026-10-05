@@ -266,3 +266,17 @@ test('the trigger list is capped, but the summary counts every distinct trigger'
   assert.equal(out.moneyOnly, true);
   assert.deepEqual(escalationTriggers([]), { triggers: [], triggerSummary: {}, moneyOnly: false, triggersTruncated: false });
 });
+test('v7: two cheap reads that agree the photo is not a driver strip do not pay for a stronger read', async () => {
+  const a4 = () => ({ warnings: [], documents: [{ noteIndex: 0, docNumber: null, docType: 'unknown', docDate: null, pageCount: 1,
+    totalUnits: null, printedLines: null, netToChargeExVat: null, vatAmountPrinted: null, totalToChargeInclVat: null,
+    notDriverStrip: true, confidence: .9, warnings: [], rows: [] }] });
+  const value = await run([result(a4()), result(a4())]);
+  assert.equal(value.calls.length, 2);
+  assert.equal(value.verification.escalationAttempted, false);
+  assert.equal(value.verification.notDriverStrip, true);
+  assert.equal(value.verification.status, 'needs_review');
+  const strip = paper(); strip.documents[0].notDriverStrip = false;
+  const normal = await run([result(strip), result(strip)]);
+  assert.equal(normal.verification.status, 'agreed');
+  assert.ok(!('notDriverStrip' in normal.verification));
+});
