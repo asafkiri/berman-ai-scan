@@ -116,6 +116,12 @@ check("v7: הניקוי מסיר N, רווחים וסימני כיוון — ו�
   && messy.documents[0].printedCheck === 147 && validModelScan(messy, oneInput), JSON.stringify(messy.documents[0]));
 const garbage = scan({ ...paper141(), internalNumber: "לא ברור", numerator: "" });
 normalizePaperFields(garbage);
+const oddCheck = scan({ ...paper141(), printedCheck: { valueOf: 1, toString: 1 } });
+normalizePaperFields(oddCheck);
+const blankCheck = scan({ ...paper141(), printedCheck: " " });
+normalizePaperFields(blankCheck);
+check("v7: ביקורת בצורה משונה (אובייקט, רווח) הופכת ל-null ולא מפילה את השרת",
+  oddCheck.documents[0].printedCheck === null && blankCheck.documents[0].printedCheck === null);
 check("v7: מספר שאינו ספרות הופך ל-null עם אזהרה, לא מפיל את הקריאה",
   garbage.documents[0].internalNumber === null && garbage.documents[0].numerator === null
   && garbage.documents[0].warnings.some(w => w.includes("internalNumber")) && validModelScan(garbage, oneInput));

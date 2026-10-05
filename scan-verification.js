@@ -213,7 +213,12 @@ export async function runVerifiedScan({ attemptScan, documents, checksum, verifi
     }
   }
   const remaining = selected.scan ? inspectScan(selected.scan, documents, checksum) : issues;
-  if (selected.verificationFailed || notDriverStrip) remaining.push(...issues);
+  if (selected.verificationFailed) remaining.push(...issues);
+  // A skipped A4 page keeps what the two reads disagreed on, without repeating what is already there.
+  else if (notDriverStrip) {
+    const seen = new Set(remaining.map(i => JSON.stringify(i)));
+    for (const item of issues) if (!seen.has(JSON.stringify(item))) { seen.add(JSON.stringify(item)); remaining.push(item); }
+  }
   // A failed verification leaves no third transcription to agree with, so that
   // path keeps its full strictness rather than clearing anything on a pair alone.
   const evidenced = selected.scan && !selected.verificationFailed

@@ -335,7 +335,9 @@ export function normalizePaperFields(scan) {
     }
     if (doc.headerText !== undefined && doc.headerText !== null && typeof doc.headerText !== "string") doc.headerText = null;
     if (doc.printedCheck !== undefined && doc.printedCheck !== null) {
-      const n = Number(typeof doc.printedCheck === "string" ? doc.printedCheck.replace(/[\p{Cf}\s]/gu, "") : doc.printedCheck);
+      const v = doc.printedCheck;
+      const text = typeof v === "string" ? v.replace(/[\p{Cf}\s]/gu, "") : "";
+      const n = typeof v === "number" ? v : text ? Number(text) : NaN;
       doc.printedCheck = Number.isInteger(n) ? n : null;
     }
     for (const field of ["otherPapersVisible", "notDriverStrip"]) {

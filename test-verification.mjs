@@ -296,3 +296,24 @@ test('v7: the A4 skip needs both reads, and every document of the request, to be
   assert.equal(two.reads.length, 3);
   assert.ok(!two.verification.notDriverStrip);
 });
+test('v7: the skip conditions are each required (flag, unknown, no rows, both reads)', async () => {
+  const a4doc = o => ({ noteIndex: 0, docNumber: null, docType: 'unknown', docDate: null, pageCount: 1, totalUnits: null, printedLines: null,
+    netToChargeExVat: null, vatAmountPrinted: null, totalToChargeInclVat: null, notDriverStrip: true, confidence: .9, warnings: [], rows: [], ...o });
+  const pair = (a, b) => [result({ warnings: [], documents: [a] }), result({ warnings: [], documents: [b] }), result(paper(), 'terra')];
+  const row = paper().documents[0].rows[0];
+  // flagged + unknown + rows that disagree → the stronger read runs
+  let v = await run(pair(a4doc({ rows: [row] }), a4doc({ rows: [{ ...row, quantity: row.quantity + 1 }] })));
+  assert.equal(v.calls.length, 3, 'rows present');
+  // flagged + invoice + 0 rows → the stronger read runs
+  v = await run(pair(a4doc({ docType: 'invoice' }), a4doc({ docType: 'invoice' })));
+  assert.equal(v.calls.length, 3, 'docType invoice');
+  // unknown + 0 rows but no flag → the stronger read runs
+  v = await run(pair(a4doc({ notDriverStrip: undefined }), a4doc({ notDriverStrip: undefined })));
+  assert.equal(v.calls.length, 3, 'flag missing');
+  // an honest A4 pair that disagrees on docDate still reports it, once
+  v = await run(pair(a4doc({ docDate: '01/10/2026' }), a4doc({ docDate: '02/10/2026' })));
+  assert.equal(v.calls.length, 2);
+  assert.ok(v.verification.issues.some(i => i.field === 'docDate' && i.reason === 'disagreement'));
+  const keys = v.verification.issues.map(i => JSON.stringify(i));
+  assert.equal(new Set(keys).size, keys.length, 'no duplicated issues');
+});
