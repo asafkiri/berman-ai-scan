@@ -104,8 +104,10 @@ const unsigned = encode({ alg: "RS256", kid: jwk.kid }) + "." + encode({
 });
 const token = unsigned + "." + crypto.sign("RSA-SHA256", Buffer.from(unsigned), privateKey).toString("base64url");
 let modelCalls = 0, modelRequests = [], responses = [scan(doc(ROWS))];
+const logLines = [];
 const server = createServer({
   env: { OPENAI_API_KEY: "local-test-only" },
+  logger: { log: line => logLines.push(line), error: console.error },
   fetchImpl: async (url, options) => {
     if (url.includes("googleapis.com")) return Response.json({ keys: [jwk] });
     if (url !== "https://api.openai.com/v1/responses") throw new Error("Unexpected request: " + url);
@@ -139,10 +141,24 @@ try {
   check("שגיאת כמות אמיתית מפעילה קריאה מתקנת אחת אחרי הקריאה הכפולה", retried.ok && modelCalls === 3 && retried.checksumRetryAttempted === true);
   check("התשובה המתוקנת נבחרת", retried.scan.documents[0].rows[0].quantity === 30);
   check("שני המודלים הזולים עצמאיים והאימות במודל הגיבוי", modelRequests.slice(-3).map(r => r.model).join() === 'gpt-5.6-luna,gpt-5.6-luna,gpt-5.6-terra');
+  // v6: התשובה והיומן אומרים מה הפעיל את הקריאה השלישית
+  check("התשובה שומרת מה הפעיל את הקריאה השלישית", retried.serviceVersion === 6 && Object.keys(retried.verification.triggerSummary || {}).length > 0
+    && retried.verification.triggers.every(t => t.field && t.reason), JSON.stringify(retried.verification));
+  const logged = logLines.map(l => JSON.parse(l)).filter(l => l.message === "scan_escalation");
+  const LOG_KEYS = "message,mode,moneyOnly,readCount,serviceVersion,severity,status,triggerSummary";
+  check("שורת יומן אחת לקריאה השלישית, בלי מספרים מהנייר", logged.length === 1 && logged[0].mode === "scan"
+    && Object.keys(logged[0]).sort().join() === LOG_KEYS
+    && logged[0].moneyOnly === retried.verification.moneyOnly
+    && JSON.stringify(logged[0].triggerSummary) === JSON.stringify(retried.verification.triggerSummary)
+    && !JSON.stringify(logged[0]).includes(String(ROWS[0].quantity)), JSON.stringify(logged));
+  check("קריאה תקינה בלי הסלמה אינה כותבת שורת יומן", logLines.filter(l => l.includes('"scan_escalation"')).length === 1);
   responses = [scan(doc(ROWS))]; modelCalls = 0;
   const verifiedPrice = await requestScan({ mode: 'verify', verificationTargets: [{ noteIndex: 0, sourcePage: 1, lineNumber: 12, field: 'unitPriceExVat' }] });
   check("בקשת אימות מחיר מפעילה רק קריאה אחת ב-Terra", verifiedPrice.ok && modelCalls === 1 && modelRequests.at(-1).model === 'gpt-5.6-terra');
   check("בקשת האימות משתמשת בצילום המקורי", modelRequests.at(-1).input[1].content.some(c => c.type === 'input_image' && c.image_url === 'data:image/jpeg;base64,YQ=='));
+  check("בקשת אימות של הלקוח נרשמת כמקור ההסלמה", verifiedPrice.verification.triggerSummary['client_request:unitPriceExVat'] === 1
+    && verifiedPrice.verification.moneyOnly === true
+    && logLines.map(l => JSON.parse(l)).filter(l => l.mode === "verify" && l.moneyOnly === true && Object.keys(l).sort().join() === LOG_KEYS).length === 1);
   modelCalls = 0;
   const invalidTarget = await requestScan({ mode: 'verify', verificationTargets: [{ noteIndex: 0, field: 'instructions', text: 'arbitrary prompt' }] });
   check("הנחיות אימות לא תקינות נדחות לפני קריאת המודל", invalidTarget.ok === false && invalidTarget.error === 'invalid_verification_targets' && modelCalls === 0);

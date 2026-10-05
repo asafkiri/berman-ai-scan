@@ -59,7 +59,7 @@ const OPENAI_IMAGE_DETAIL = "original";
 const OPENAI_REASONING_EFFORT = "medium";
 const OPENAI_MAX_OUTPUT_TOKENS = 48_000;
 const OPENAI_TIMEOUT_MS = 180_000;
-const SERVICE_VERSION = 5; // two independent reads + one bounded verification
+const SERVICE_VERSION = 6; // two independent reads + one bounded verification; v6 records what triggered it
 // עוגן היחידות: כמות יכולה להיות עשרונית רק בטעות קריאה; ההשוואה בסבילות אפס מעשית.
 const CHECKSUM_UNITS_TOLERANCE = 0.001;
 const FIREBASE_PROJECT_ID = "berman-marketkiri";
@@ -1416,6 +1416,15 @@ function decodeAnalyzeClaims(result, aliasToId) {
       const verified = await runVerifiedScan({ attemptScan, documents, checksum: scanChecksumMismatches,
         verificationOnly, targets: verificationTargets });
       const { selected, verification, reads, usage } = verified;
+      // One structured line per paid stronger read (Cloud Run logs): which fields caused it.
+      // No image, no document number, no quantities — field names, reasons and counts only.
+      if (verification.escalationAttempted && typeof logger.log === "function") {
+        try {
+          logger.log(JSON.stringify({ severity: "INFO", message: "scan_escalation", serviceVersion: SERVICE_VERSION,
+            mode: verificationOnly ? "verify" : "scan", status: verification.status, moneyOnly: verification.moneyOnly === true,
+            triggerSummary: verification.triggerSummary || {}, readCount: verification.readCount }));
+        } catch (logError) {}
+      }
       if (!selected.scan) {
         finishScan({ ...selected.fail.body, serviceVersion: SERVICE_VERSION, verification, reads, usage });
         return;

@@ -137,6 +137,34 @@ function withoutAgreedConfidence(issues, scan, others) {
   });
 }
 
+// Which issues made the stronger (paid) read happen. The issues list kept in the
+// response is what is still open after that read; without this record there is no
+// way to tell, a week later, whether a third read was caused by a price, a code,
+// a quantity or a self-scored confidence. moneyOnly marks the escalations that only
+// money fields caused: the client no longer uses printed money to decide anything
+// (it is kept for identification), so these are the reads that reading prices costs.
+const MONEY_FIELDS = new Set(['unitPriceExVat', 'netToChargeExVat', 'vatAmountPrinted', 'totalToChargeInclVat', 'totals']);
+const TRIGGER_LIMIT = 60;
+export function escalationTriggers(issues) {
+  const seen = new Set(), triggers = [], summary = {};
+  let moneyOnly = true;
+  for (const item of issues || []) {
+    if (!item) continue;
+    const t = { noteIndex: item.noteIndex, field: item.field, reason: item.reason,
+      ...(item.rowIndex != null ? { rowIndex: item.rowIndex } : {}),
+      ...(item.sourcePage != null ? { sourcePage: item.sourcePage } : {}),
+      ...(item.lineNumber != null ? { lineNumber: item.lineNumber } : {}) };
+    const key = JSON.stringify(t);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const tag = t.reason + ':' + t.field;
+    summary[tag] = (summary[tag] || 0) + 1;
+    if (!MONEY_FIELDS.has(t.field)) moneyOnly = false;
+    if (triggers.length < TRIGGER_LIMIT) triggers.push(t);
+  }
+  return { triggers, triggerSummary: summary, moneyOnly: seen.size > 0 && moneyOnly, triggersTruncated: seen.size > triggers.length };
+}
+
 // One upload, two independent base calls, at most one stronger read.
 export async function runVerifiedScan({ attemptScan, documents, checksum, verificationOnly = false, targets = [] }) {
   const reads = [];
@@ -149,8 +177,15 @@ export async function runVerifiedScan({ attemptScan, documents, checksum, verifi
       usage: result.data?.usage || null, escalation: escalate, error: result.fail?.body?.error || null });
     return result;
   };
-  let selected, issues = [], escalationAttempted = verificationOnly, agreementScans = [];
-  if (verificationOnly) selected = await read(true);
+  let selected, issues = [], escalationAttempted = verificationOnly, agreementScans = [], escalation = null;
+  if (verificationOnly) {
+    // The client asked for this read itself; its targets are the trigger.
+    // Only the validated target fields are recorded; anything else on a target
+    // (a reason, a rowIndex) is the client's own text and is not echoed back.
+    escalation = escalationTriggers((targets || []).map(t => t && ({ noteIndex: t.noteIndex, field: t.field,
+      sourcePage: t.sourcePage, lineNumber: t.lineNumber, reason: 'client_request' })));
+    selected = await read(true);
+  }
   else {
     const pair = await Promise.all([read(false, 1), read(false, 2)]);
     const good = pair.filter(r => r.scan);
@@ -161,6 +196,7 @@ export async function runVerifiedScan({ attemptScan, documents, checksum, verifi
     if (issues.length) {
       targets = issues;
       escalationAttempted = true;
+      escalation = escalationTriggers(issues);
       const strong = await read(true);
       if (strong.scan) selected = strong;
       else if (!selected.scan) selected = strong;
@@ -178,5 +214,5 @@ export async function runVerifiedScan({ attemptScan, documents, checksum, verifi
   return { selected, verification: { version: 1, status, primaryReads: verificationOnly ? 0 : 2,
     escalationAttempted, reasons: [...new Set(issues.map(i => i.reason))], issues: evidenced,
     agreementCleared: remaining.length - evidenced.length,
-    readCount: reads.length }, reads, usage: totalUsage(reads) };
+    readCount: reads.length, ...(escalation || {}) }, reads, usage: totalUsage(reads) };
 }
