@@ -6,7 +6,7 @@
 // נייר. הבדיקות מוודאות גם שההתנהגות הישנה — עם עוגן מוקלד — לא זזה.
 import crypto from "node:crypto";
 import { Readable } from "node:stream";
-import { scanChecksumMismatches, validModelScan, createServer } from "./server.js";
+import { scanChecksumMismatches, validModelScan, normalizePaperFields, createServer } from "./server.js";
 
 let pass = 0;
 let fail = 0;
@@ -108,7 +108,17 @@ const a4 = () => ({ noteIndex: 0, docNumber: null, docType: "unknown", docDate: 
 const oneInput = [{ noteIndex: 0, pages: ["image"] }];
 check("נייר קצר עם שדות v7 עובר את אימות המבנה", validModelScan(scan(paper141()), oneInput));
 check("ושורות הנייר נסגרות מול בלוק הסיכום שלו", scanChecksumMismatches(scan(paper141()), noAnchor).length === 0);
-check("מספר פנימי עם האות N נדחה (רק ספרות)", !validModelScan(scan({ ...paper141(), internalNumber: "N290095159" }), oneInput));
+check("מספר פנימי עם האות N נדחה כשאינו מנוקה (רק ספרות)", !validModelScan(scan({ ...paper141(), internalNumber: "N290095159" }), oneInput));
+const messy = scan({ ...paper141(), internalNumber: "N 290095159\u200f", numerator: "95141.00", headerText: 5, printedCheck: "147" });
+normalizePaperFields(messy);
+check("v7: הניקוי מסיר N, רווחים וסימני כיוון — והקריאה נשארת תקינה",
+  messy.documents[0].internalNumber === "290095159" && messy.documents[0].numerator === "95141" && messy.documents[0].headerText === null
+  && messy.documents[0].printedCheck === 147 && validModelScan(messy, oneInput), JSON.stringify(messy.documents[0]));
+const garbage = scan({ ...paper141(), internalNumber: "לא ברור", numerator: "" });
+normalizePaperFields(garbage);
+check("v7: מספר שאינו ספרות הופך ל-null עם אזהרה, לא מפיל את הקריאה",
+  garbage.documents[0].internalNumber === null && garbage.documents[0].numerator === null
+  && garbage.documents[0].warnings.some(w => w.includes("internalNumber")) && validModelScan(garbage, oneInput));
 check("ביקורת שאינה מספר שלם נדחית", !validModelScan(scan({ ...paper141(), printedCheck: 111.5 }), oneInput));
 check("דגל שאינו בוליאני נדחה", !validModelScan(scan({ ...paper141(), otherPapersVisible: "no" }), oneInput)
   && !validModelScan(scan({ ...paper141(), notDriverStrip: null }), oneInput));
@@ -165,6 +175,9 @@ try {
   const systemText = modelRequests[0].input[0].content[0].text;
   check("v7: ההנחיה מכירה את ניירות המסופון הקצרים ואת דף ה-A4", systemText.includes("ת.משלוח החזרה יבש") && /\b15\. headerText/.test(systemText)
     && systemText.includes("notDriverStrip הוא true") && systemText.includes("otherPapersVisible הוא true"));
+  check("v7: הניסוח מבהיר ספרות בלבד, נייר אחר = מספר אחר, ו-A4 כחריג היחיד לכללים 9 ו-11",
+    systemText.includes("הספרות בלבד של \"מספר תעודה פנימי\"") && systemText.includes("עם מספר תעודה אחר משלו")
+    && systemText.includes("זה החריג היחיד לכללים 9 ו-11") && systemText.includes("גם כשהצילום מטושטש"));
   check("v7: ההנחיה הקודמת לא נמחקה", systemText.includes("14. לפני הפלט בצע בדיקה פנימית") && systemText.includes("ח.משלוח החזרה"));
   responses = [scan(badQty), scan(doc(ROWS)), scan(doc(ROWS))]; modelCalls = 0;
   const retried = await requestScan();
@@ -193,11 +206,22 @@ try {
   const small = await requestScan();
   check("v7: נייר חיוב קצר נסגר בשתי קריאות, והשדות החדשים מגיעים ללקוח", small.ok && modelCalls === 2 && small.verification.status === "agreed"
     && small.scan.documents[0].headerText === "ת.משלוח" && small.scan.documents[0].printedCheck === 111 && small.scan.documents[0].numerator === "95141");
+  responses = [scan({ ...paper141(), internalNumber: "N290095159" }), scan(paper141())]; modelCalls = 0;
+  const withN = await requestScan();
+  check("v7: מספר פנימי עם N בקריאה זולה אחת אינו מפעיל קריאה בתשלום", withN.ok && modelCalls === 2 && withN.verification.status === "agreed", JSON.stringify(withN.verification));
   responses = [scan(a4()), scan(a4())]; modelCalls = 0;
+  const logsBefore = logLines.length;
   const notStrip = await requestScan();
   check("v7: דף A4 — שתי הקריאות הזולות מסכימות שאינו נייר מסופון, ואין קריאה שלישית בתשלום",
     modelCalls === 2 && notStrip.verification.escalationAttempted === false && notStrip.verification.notDriverStrip === true
-    && notStrip.verification.status === "needs_review", JSON.stringify(notStrip.verification));
+    && notStrip.verification.status === "needs_review" && notStrip.verification.issues.length > 0, JSON.stringify(notStrip.verification));
+  check("v7: הדילוג נרשם ביומן — כדי למדוד כמה פעמים הוא קורה על נייר אמיתי",
+    logLines.slice(logsBefore).map(l => JSON.parse(l)).filter(l => l.message === "scan_not_driver_strip"
+      && Object.keys(l).sort().join() === "message,readCount,reasons,serviceVersion,severity").length === 1);
+  responses = [scan({ ...paper141(), notDriverStrip: true }), scan({ ...paper141(), notDriverStrip: true, rows: paper141().rows.map((r, i) => i ? { ...r, quantity: 3 } : { ...r, quantity: 12 }) }), scan(paper141())]; modelCalls = 0;
+  const flaggedStrip = await requestScan();
+  check("v7: סרט אמיתי ששתי הקריאות סימנו בטעות כ'לא נייר' — עם שורות שאינן מסכימות — עדיין משלם על הקריאה החזקה",
+    modelCalls === 3 && flaggedStrip.verification.escalationAttempted === true && !flaggedStrip.verification.notDriverStrip, JSON.stringify(flaggedStrip.verification));
   responses = [scan(a4()), scan({ ...a4(), notDriverStrip: false }), scan(a4())]; modelCalls = 0;
   const unsure = await requestScan();
   check("v7: כשרק קריאה אחת חושבת שזה לא נייר מסופון — הקריאה החזקה רצה כרגיל",

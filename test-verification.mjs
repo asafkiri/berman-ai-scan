@@ -280,3 +280,19 @@ test('v7: two cheap reads that agree the photo is not a driver strip do not pay 
   assert.equal(normal.verification.status, 'agreed');
   assert.ok(!('notDriverStrip' in normal.verification));
 });
+test('v7: the A4 skip needs both reads, and every document of the request, to be an empty non-strip page', async () => {
+  const a4doc = (noteIndex = 0) => ({ noteIndex, docNumber: null, docType: 'unknown', docDate: null, pageCount: 1, totalUnits: null, printedLines: null,
+    netToChargeExVat: null, vatAmountPrinted: null, totalToChargeInclVat: null, notDriverStrip: true, confidence: .9, warnings: [], rows: [] });
+  // one cheap read failed: a single "not a strip" read is not enough to skip the paid read
+  const failed = await run([{ fail: { status: 502, body: { ok: false, error: 'invalid_model_output' } } }, result({ warnings: [], documents: [a4doc()] }), result(paper(), 'terra')]);
+  assert.equal(failed.calls.length, 3);
+  assert.ok(!('notDriverStrip' in failed.verification));
+  // a two-document request: one A4 page and one strip — the strip still gets its paid read when disputed
+  const strip = paper().documents[0], other = { ...strip, noteIndex: 1, rows: strip.rows.map(r => ({ ...r, quantity: r.quantity + 1 })) };
+  const docs2 = [{ noteIndex: 0, pages: ['a'] }, { noteIndex: 1, pages: ['b'] }];
+  const two = await runVerifiedScan({ documents: docs2, checksum: scanChecksumMismatches,
+    attemptScan: (() => { const outs = [result({ warnings: [], documents: [a4doc(0), { ...strip, noteIndex: 1 }] }), result({ warnings: [], documents: [a4doc(0), other] }),
+      result({ warnings: [], documents: [a4doc(0), { ...strip, noteIndex: 1 }] }, 'terra')]; return async () => outs.shift(); })() });
+  assert.equal(two.reads.length, 3);
+  assert.ok(!two.verification.notDriverStrip);
+});

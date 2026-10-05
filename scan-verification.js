@@ -194,10 +194,13 @@ export async function runVerifiedScan({ attemptScan, documents, checksum, verifi
     else issues.push({ noteIndex: 0, field: 'document', reason: 'read_failed' });
     for (const result of good) issues.push(...inspectScan(result.scan, documents, checksum));
     // v7: both cheap reads say the photo is not a driver strip at all (an A4 invoice,
-    // a promo letter). A stronger read cannot turn it into one, so it is not paid for;
-    // the issues still reach the client and the result stays needs_review.
+    // a promo letter) — and both returned exactly that: no header class, no rows. A
+    // stronger read cannot turn such a page into a strip, so it is not paid for. The
+    // flag alone is never trusted: a read that set it but still returned rows or a
+    // docType goes through the normal path, and the skipped issues stay in the result
+    // so the status is always needs_review.
     notDriverStrip = good.length === 2 && good.every(r => (r.scan.documents || []).length > 0
-      && r.scan.documents.every(d => d.notDriverStrip === true));
+      && r.scan.documents.every(d => d.notDriverStrip === true && d.docType === 'unknown' && !(d.rows || []).length));
     if (issues.length && !notDriverStrip) {
       targets = issues;
       escalationAttempted = true;
@@ -210,7 +213,7 @@ export async function runVerifiedScan({ attemptScan, documents, checksum, verifi
     }
   }
   const remaining = selected.scan ? inspectScan(selected.scan, documents, checksum) : issues;
-  if (selected.verificationFailed) remaining.push(...issues);
+  if (selected.verificationFailed || notDriverStrip) remaining.push(...issues);
   // A failed verification leaves no third transcription to agree with, so that
   // path keeps its full strictness rather than clearing anything on a pair alone.
   const evidenced = selected.scan && !selected.verificationFailed
