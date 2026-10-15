@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { compareScans, inspectScan, runVerifiedScan, escalationTriggers } from './scan-verification.js';
+import { compareScans, inspectScan, runVerifiedScan, escalationTriggers, docDateIso } from './scan-verification.js';
 import { scanChecksumMismatches } from './server.js';
 
 const documents = [{ noteIndex: 0, pages: ['original-photo'] }];
@@ -55,6 +55,7 @@ for (const field of ['itemCode', 'barcode', 'quantity', 'unitPriceExVat']) {
     assert.equal(value.verification.status, 'verified');
   });
 }
+// בקשה בלי dateDefaults (אפליקציה 141 ומטה) — כמו v7, גם התאריך. עם dateDefaults — בלי התאריך (הבדיקות של v8 למטה).
 for (const field of ['docNumber', 'docDate', 'docType', 'netToChargeExVat', 'totalUnits', 'printedLines', 'vatAmountPrinted', 'totalToChargeInclVat']) {
   test('a disputed document ' + field + ' triggers the stronger read', async () => {
     const wrong = paper(), doc = wrong.documents[0];
@@ -310,10 +311,225 @@ test('v7: the skip conditions are each required (flag, unknown, no rows, both re
   // unknown + 0 rows but no flag → the stronger read runs
   v = await run(pair(a4doc({ notDriverStrip: undefined }), a4doc({ notDriverStrip: undefined })));
   assert.equal(v.calls.length, 3, 'flag missing');
-  // an honest A4 pair that disagrees on docDate still reports it, once
+  // an honest A4 pair that disagrees on docDate still reports it, once (a request without dateDefaults — v7's checks)
   v = await run(pair(a4doc({ docDate: '01/10/2026' }), a4doc({ docDate: '02/10/2026' })));
   assert.equal(v.calls.length, 2);
   assert.ok(v.verification.issues.some(i => i.field === 'docDate' && i.reason === 'disagreement'));
-  const keys = v.verification.issues.map(i => JSON.stringify(i));
+  let keys = v.verification.issues.map(i => JSON.stringify(i));
   assert.equal(new Set(keys).size, keys.length, 'no duplicated issues');
+  // v8 with dateDefaults: a date difference is no longer an issue — it is reported in
+  // docDateUnreliable instead, so the disagreement here is the docNumber.
+  v = await run(pair(a4doc({ docNumber: '1001', docDate: '01/10/2026' }), a4doc({ docNumber: '1002', docDate: '02/10/2026' })), { dateDefaults: true });
+  assert.equal(v.calls.length, 2);
+  assert.ok(v.verification.issues.some(i => i.field === 'docNumber' && i.reason === 'disagreement'));
+  assert.ok(!v.verification.issues.some(i => i.field === 'docDate'));
+  assert.deepEqual(v.verification.docDateUnreliable, [{ noteIndex: 0, reason: 'disputed' }]);
+  keys = v.verification.issues.map(i => JSON.stringify(i));
+  assert.equal(new Set(keys).size, keys.length, 'no duplicated issues');
+});
+
+// ===== v8: תאריך שלא נקרא היטב — לא עולה כסף ולא עוצר =====
+// החלטת הבעלים: תאריך שלא נקרא היטב — ברירת המחדל היא יום הקליטה (בלקוח). לכן התאריך
+// כבר אינו מפעיל קריאה שלישית בתשלום ואינו משאיר needs_review; השרת רק מדווח, לכל
+// מסמך, אם התאריך הסופי לא נקרא ('unreadable') או שקריאה אחרת קראה תאריך אחר ואף אחת
+// לא אישרה אותו ('disputed'). הערך המודפס עצמו לא משתנה.
+const dated = (date, scan = paper()) => { scan.documents[0].docDate = date; return scan; };
+// אפליקציה 142 ומעלה שולחת dateDefaults: true — רק לה התאריך יוצא מהבדיקה
+const DD = { dateDefaults: true };
+const run8 = (outputs, options = {}) => run(outputs, { ...DD, ...options });
+
+test('v8: docDateIso reads the printed day the way the client does, and rejects what is not a calendar date', () => {
+  assert.equal(docDateIso('14/09/2026'), '2026-09-14');
+  assert.equal(docDateIso(' 14.9.26 '), '2026-09-14');
+  assert.equal(docDateIso('2026-09-14'), '2026-09-14');
+  assert.equal(docDateIso('4-10-2026'), '2026-10-04');
+  for (const bad of [null, undefined, '', 'לא ברור', '31/02/2026', '14/13/2026', '2026-9-14', '14/09']) {
+    assert.equal(docDateIso(bad), null, String(bad));
+  }
+});
+test('v8: the date is neither compared nor required by the issue checks', () => {
+  assert.deepEqual(compareScans(paper(), dated('15/09/2026'), DD), []);
+  assert.deepEqual(compareScans(paper(), dated(null), DD), []);
+  assert.deepEqual(inspectScan(dated(null), documents, scanChecksumMismatches, DD), []);
+  assert.deepEqual(inspectScan(dated('לא ברור'), documents, scanChecksumMismatches, DD), []);
+});
+test('v8: a date-only difference between the cheap reads costs two calls, stays agreed, and flags the date', async () => {
+  const value = await run8([result(paper()), result(dated('15/09/2026'))]);
+  assert.equal(value.calls.length, 2);
+  assert.equal(value.verification.escalationAttempted, false);
+  assert.equal(value.verification.status, 'agreed');
+  assert.deepEqual(value.verification.issues, []);
+  assert.ok(!('triggers' in value.verification));
+  assert.deepEqual(value.verification.docDateUnreliable, [{ noteIndex: 0, reason: 'disputed' }]);
+  assert.equal(value.selected.scan.documents[0].docDate, '14/09/2026', 'the printed value is returned as read');
+});
+test('v8: two reads of the same day in different formats confirm it', async () => {
+  const value = await run8([result(dated('14/09/26')), result(dated('2026-09-14'))]);
+  assert.equal(value.calls.length, 2);
+  assert.equal(value.verification.status, 'agreed');
+  assert.deepEqual(value.verification.docDateUnreliable, []);
+});
+for (const date of [null, '', 'לא ברור', '31/02/2026']) {
+  test('v8: an unread date alone (' + JSON.stringify(date) + ') does not pay for the stronger read', async () => {
+    const value = await run8([result(dated(date)), result(dated(date))]);
+    assert.equal(value.calls.length, 2);
+    assert.equal(value.verification.escalationAttempted, false);
+    assert.equal(value.verification.status, 'agreed');
+    assert.deepEqual(value.verification.issues, []);
+    assert.deepEqual(value.verification.docDateUnreliable, [{ noteIndex: 0, reason: 'unreadable' }]);
+  });
+}
+test('v8: a read without a date neither confirms nor disputes; only the final read decides unreadable', async () => {
+  const firstRead = await run8([result(paper()), result(dated(null))]);
+  assert.equal(firstRead.calls.length, 2);
+  assert.equal(firstRead.verification.status, 'agreed');
+  assert.deepEqual(firstRead.verification.docDateUnreliable, [], 'the other read saw no date, so nothing disputes it');
+  assert.deepEqual(firstRead.verification.docDateRead, [], 'the final read has its own date');
+  // the same evidence with the reads swapped: the final read has no date and the other read 14/09 —
+  // nothing disputes that day, so it is not "unreadable"; it is reported apart (docDateRead),
+  // and the printed value of the final read stays as read
+  const missing = await run8([result(dated(null)), result(paper())]);
+  assert.equal(missing.calls.length, 2);
+  assert.equal(missing.verification.status, 'agreed');
+  assert.deepEqual(missing.verification.docDateUnreliable, []);
+  assert.deepEqual(missing.verification.docDateRead, [{ noteIndex: 0, day: '2026-09-14' }]);
+  assert.equal(missing.selected.scan.documents[0].docDate, null, 'no date is borrowed into the scan from the other read');
+});
+test('v8: the final read has no date — another read\'s day is reported only when the other reads read exactly one day', async () => {
+  const price = date => { const s = dated(date); s.documents[0].rows[1].unitPriceExVat = 14.84; return s; };
+  // two other reads, two different days — nothing to carry: unreadable, as before
+  const split = await run8([result(price('14/09/2026')), result(dated('15/09/2026')), result(dated(null), 'terra')]);
+  assert.equal(split.calls.length, 3);
+  assert.deepEqual(split.verification.docDateUnreliable, [{ noteIndex: 0, reason: 'unreadable' }]);
+  assert.deepEqual(split.verification.docDateRead, []);
+  // the same day in two formats is one day
+  const same = await run8([result(price('14/09/26')), result(dated('2026-09-14')), result(dated(null), 'terra')]);
+  assert.deepEqual(same.verification.docDateUnreliable, []);
+  assert.deepEqual(same.verification.docDateRead, [{ noteIndex: 0, day: '2026-09-14' }]);
+  // a text or 31/02 in another read is not a day
+  const junk = await run8([result(dated(null)), result(dated('31/02/2026'))]);
+  assert.deepEqual(junk.verification.docDateUnreliable, [{ noteIndex: 0, reason: 'unreadable' }]);
+  assert.deepEqual(junk.verification.docDateRead, []);
+  // without dateDefaults (app 141) the date is still checked as in v7: a missing date pays for the stronger
+  // read and stays needs_review when that read misses it too — the extra field changes nothing there
+  const legacy = await run([result(dated(null)), result(paper()), result(dated(null), 'terra')]);
+  assert.equal(legacy.calls.length, 3);
+  assert.equal(legacy.verification.status, 'needs_review');
+  assert.ok(legacy.verification.issues.some(i => i.field === 'docDate'));
+});
+test('v8: when the stronger read ran for another reason, its date is still checked against the cheap pair', async () => {
+  const price = date => { const s = dated(date); s.documents[0].rows[1].unitPriceExVat = 14.84; return s; };
+  // the pair disagreed on the date as well; the stronger read agrees with one of them
+  const confirmed = await run8([result(price('14/09/2026')), result(dated('15/09/2026')), result(paper(), 'terra')]);
+  assert.equal(confirmed.calls.length, 3);
+  assert.equal(confirmed.verification.status, 'verified');
+  assert.deepEqual(confirmed.verification.triggerSummary, { 'disagreement:unitPriceExVat': 1 }, 'the date is not a trigger');
+  assert.ok(!confirmed.calls[2][0].includes('תאריך התעודה'), 'the stronger read is not asked about the date');
+  assert.deepEqual(confirmed.verification.docDateUnreliable, []);
+  // both cheap reads read one day, the stronger read — whose scan is kept — another
+  const disputed = await run8([result(price('15/09/2026')), result(dated('15/09/2026')), result(paper(), 'terra')]);
+  assert.equal(disputed.verification.status, 'verified', 'the date alone never makes needs_review');
+  assert.equal(disputed.selected.scan.documents[0].docDate, '14/09/2026');
+  assert.deepEqual(disputed.verification.docDateUnreliable, [{ noteIndex: 0, reason: 'disputed' }]);
+  // the stronger read could not read the date; both cheap reads read 14/09 — that day is carried apart
+  // (docDateRead), the stronger read's printed value stays null
+  const unread = await run8([result(price('14/09/2026')), result(paper()), result(dated(null), 'terra')]);
+  assert.equal(unread.verification.status, 'verified');
+  assert.deepEqual(unread.verification.issues, []);
+  assert.deepEqual(unread.verification.docDateUnreliable, []);
+  assert.deepEqual(unread.verification.docDateRead, [{ noteIndex: 0, day: '2026-09-14' }]);
+  assert.equal(unread.selected.scan.documents[0].docDate, null);
+  // no read read a date at all — unreadable
+  const none = await run8([result(price(null)), result(dated(null)), result(dated(null), 'terra')]);
+  assert.deepEqual(none.verification.docDateUnreliable, [{ noteIndex: 0, reason: 'unreadable' }]);
+  assert.deepEqual(none.verification.docDateRead, []);
+});
+test('v8: a failed stronger read keeps its other issues but never adds the date to them', async () => {
+  const wrong = dated('15/09/2026'); wrong.documents[0].rows[1].unitPriceExVat = 14.84;
+  const value = await run8([result(wrong), result(paper()), { fail: { body: { error: 'openai_timeout' } } }]);
+  assert.equal(value.calls.length, 3);
+  assert.equal(value.verification.status, 'needs_review');
+  assert.ok(value.verification.issues.some(i => i.field === 'unitPriceExVat'));
+  assert.ok(!value.verification.issues.some(i => i.field === 'docDate'));
+  assert.deepEqual(value.verification.docDateUnreliable, [{ noteIndex: 0, reason: 'disputed' }]);
+});
+test('v8: a date difference does not keep a low document confidence open when three reads agree on the rest', async () => {
+  const dim = date => { const s = dated(date); s.documents[0].confidence = .7; return s; };
+  const value = await run8([result(dim('14/09/2026')), result(paper()), result(dim('15/09/2026'), 'terra')]);
+  assert.equal(value.calls.length, 3);
+  assert.equal(value.verification.status, 'verified');
+  assert.deepEqual(value.verification.issues, []);
+  assert.equal(value.verification.agreementCleared, 1);
+  assert.deepEqual(value.verification.docDateUnreliable, [{ noteIndex: 0, reason: 'disputed' }]);
+});
+test('v8: a client-requested verification has one read — only an unread date can be flagged', async () => {
+  const targets = [{ noteIndex: 0, sourcePage: 1, lineNumber: 12, field: 'itemCode' }];
+  const read = await run8([result(paper(), 'terra')], { verificationOnly: true, targets });
+  assert.deepEqual(read.verification.docDateUnreliable, []);
+  const unread = await run8([result(dated(null), 'terra')], { verificationOnly: true, targets });
+  assert.equal(unread.calls.length, 1);
+  assert.equal(unread.verification.status, 'verified');
+  assert.deepEqual(unread.verification.docDateUnreliable, [{ noteIndex: 0, reason: 'unreadable' }]);
+  assert.deepEqual(unread.verification.docDateRead, [], 'one read — no other read to carry a day from');
+});
+// שומר: רק התאריך יצא מהבדיקה — כל שדה סיכום אחר שלא נקרא עדיין משלם על הקריאה החזקה.
+for (const field of ['docNumber', 'totalUnits', 'printedLines', 'netToChargeExVat']) {
+  test('v8: an unread ' + field + ' in both reads still triggers the stronger read', async () => {
+    const blank = () => { const s = paper(); s.documents[0][field] = null; return s; };
+    const value = await run8([result(blank()), result(blank()), result(paper(), 'terra')]);
+    assert.equal(value.calls.length, 3);
+    assert.equal(value.verification.triggerSummary['unreadable:' + field], 1);
+    assert.equal(value.verification.status, 'verified');
+  });
+}
+test('v8: the date is judged per document', async () => {
+  const two = date => { const s = paper(); s.documents.push({ ...structuredClone(s.documents[0]), noteIndex: 1, docDate: date }); return s; };
+  const docs2 = [{ noteIndex: 0, pages: ['a'] }, { noteIndex: 1, pages: ['b'] }];
+  const outs = [result(two('14/09/2026')), result(two('16/09/2026'))];
+  const value = await runVerifiedScan({ documents: docs2, checksum: scanChecksumMismatches, attemptScan: async () => outs.shift(), dateDefaults: true });
+  assert.equal(value.reads.length, 2);
+  assert.equal(value.verification.status, 'agreed');
+  assert.deepEqual(value.verification.docDateUnreliable, [{ noteIndex: 1, reason: 'disputed' }]);
+});
+
+// ===== v8 בלי dateDefaults (אפליקציה 141 ומטה) — בדיקת התאריך של v7, בלי שינוי =====
+// אפליקציה 141 לא קוראת את docDateUnreliable: אילו v8 היה מוותר גם לה על בדיקת התאריך, תאריך במחלוקת
+// היה עובר אצלה בשקט (התאריך של הקריאה הזולה הראשונה, ובתעודת משלוח מהשבוע האחרון — יום הקליטה).
+// לכן רק בקשה שאומרת dateDefaults: true מקבלת את כללי v8; כל בקשה אחרת — כמו v7. סדר הפריסה לא משנה.
+test('v8 without dateDefaults: a date-only difference still pays for the stronger read, which settles the date (as v7)', async () => {
+  const value = await run([result(paper()), result(dated('15/09/2026')), result(paper(), 'terra')]);
+  assert.equal(value.calls.length, 3);
+  assert.equal(value.verification.escalationAttempted, true);
+  assert.deepEqual(value.verification.triggerSummary, { 'disagreement:docDate': 1 });
+  assert.match(value.calls[2][0], /תאריך התעודה/, 'the stronger read is asked about the date, as in v7');
+  assert.equal(value.verification.status, 'verified');
+  assert.equal(value.verification.dateDefaults, false);
+  assert.deepEqual(value.verification.docDateUnreliable, [], 'the stronger read is confirmed by one of the cheap reads');
+});
+test('v8 without dateDefaults: an unread date pays for the stronger read and stays needs_review when that read cannot read it either', async () => {
+  const value = await run([result(dated(null)), result(dated(null)), result(dated(null), 'terra')]);
+  assert.equal(value.calls.length, 3);
+  assert.equal(value.verification.triggerSummary['unreadable:docDate'], 1, 'one trigger (the same issue from both reads)');
+  assert.equal(value.verification.status, 'needs_review');
+  assert.ok(value.verification.issues.some(i => i.field === 'docDate' && i.reason === 'unreadable'));
+  assert.deepEqual(value.verification.docDateUnreliable, [{ noteIndex: 0, reason: 'unreadable' }]);
+  // a client-requested verification without the flag — the unread date keeps it in needs_review (as v7)
+  const targets = [{ noteIndex: 0, sourcePage: 1, lineNumber: 12, field: 'itemCode' }];
+  const verify = await run([result(dated(null), 'terra')], { verificationOnly: true, targets });
+  assert.equal(verify.verification.status, 'needs_review');
+  assert.ok(verify.verification.issues.some(i => i.field === 'docDate'));
+});
+test('v8 without dateDefaults: the exported checks default to v7 (date compared and required); only true switches them', async () => {
+  assert.deepEqual(compareScans(paper(), dated('15/09/2026')).map(i => i.field), ['docDate']);
+  assert.deepEqual(inspectScan(dated(null), documents, scanChecksumMismatches).map(i => i.field), ['docDate']);
+  assert.deepEqual(compareScans(paper(), dated('2026-09-14')), [], 'the same day in another format is not a disagreement');
+  for (const flag of [undefined, false, 'true', 1]) {
+    const value = await run([result(paper()), result(dated('15/09/2026')), result(paper(), 'terra')], { dateDefaults: flag });
+    assert.equal(value.calls.length, 3, String(flag));
+  }
+  const dim = date => { const s = dated(date); s.documents[0].confidence = .7; return s; };
+  // a low document confidence is cleared by three reads only when they agree on the date too (v7)
+  const value = await run([result(dim('14/09/2026')), result(paper()), result(dim('15/09/2026'), 'terra')]);
+  assert.equal(value.verification.status, 'needs_review');
+  assert.ok(value.verification.issues.some(i => i.field === 'document' && i.reason === 'low_confidence'));
 });
