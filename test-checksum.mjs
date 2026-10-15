@@ -191,7 +191,7 @@ try {
   check("התשובה המתוקנת נבחרת", retried.scan.documents[0].rows[0].quantity === 30);
   check("שני המודלים הזולים עצמאיים והאימות במודל הגיבוי", modelRequests.slice(-3).map(r => r.model).join() === 'gpt-5.6-luna,gpt-5.6-luna,gpt-5.6-terra');
   // v6: התשובה והיומן אומרים מה הפעיל את הקריאה השלישית
-  check("התשובה שומרת מה הפעיל את הקריאה השלישית", retried.serviceVersion === 7 && Object.keys(retried.verification.triggerSummary || {}).length > 0
+  check("התשובה שומרת מה הפעיל את הקריאה השלישית", retried.serviceVersion === 8 && Object.keys(retried.verification.triggerSummary || {}).length > 0
     && retried.verification.triggers.every(t => t.field && t.reason), JSON.stringify(retried.verification));
   const logged = logLines.map(l => JSON.parse(l)).filter(l => l.message === "scan_escalation");
   const LOG_KEYS = "message,mode,moneyOnly,readCount,serviceVersion,severity,status,triggerSummary";
@@ -232,6 +232,39 @@ try {
   const unsure = await requestScan();
   check("v7: כשרק קריאה אחת חושבת שזה לא נייר מסופון — הקריאה החזקה רצה כרגיל",
     modelCalls === 3 && unsure.verification.escalationAttempted === true && !unsure.verification.notDriverStrip);
+  // v8: תאריך שלא נקרא היטב — לא עולה קריאה בתשלום, לא עוצר, ומדווח ללקוח. רק לאפליקציה שאומרת
+  // dateDefaults: true (142 ומעלה); בקשה בלעדיו (141) — בדיקת התאריך של v7, כדי שסדר הפריסה לא ישנה
+  responses = [scan(paper141()), scan({ ...paper141(), docDate: "05/10/2026" })]; modelCalls = 0;
+  const escalationsBefore = logLines.filter(l => l.includes('"scan_escalation"')).length;
+  const dateOnly = await requestScan({ dateDefaults: true });
+  check("v8: שתי קריאות שנבדלות רק בתאריך — שתי קריאות בלבד, agreed, והתאריך מסומן 'disputed'",
+    dateOnly.ok && modelCalls === 2 && dateOnly.verification.status === "agreed" && dateOnly.verification.escalationAttempted === false
+    && dateOnly.verification.dateDefaults === true
+    && JSON.stringify(dateOnly.verification.docDateUnreliable) === JSON.stringify([{ noteIndex: 0, reason: "disputed" }]), JSON.stringify(dateOnly.verification));
+  check("v8: הערך המודפס חוזר כפי שנקרא, בלי אזהרת 'לא ניתן לאמת' ובלי שורת יומן של הסלמה",
+    dateOnly.scan.documents[0].docDate === "04/10/2026" && !dateOnly.scan.warnings.some(w => w.includes("תאריך"))
+    && logLines.filter(l => l.includes('"scan_escalation"')).length === escalationsBefore);
+  responses = [scan(paper141()), scan({ ...paper141(), docDate: "05/10/2026" }), scan(paper141())]; modelCalls = 0;
+  const legacy = await requestScan();
+  check("v8: אפליקציה 141 (בלי dateDefaults) — פער בתאריך בלבד עדיין מכריע בקריאה החזקה, כמו v7",
+    legacy.ok && modelCalls === 3 && legacy.verification.status === "verified" && legacy.verification.dateDefaults === false
+    && legacy.verification.triggerSummary["disagreement:docDate"] === 1 && legacy.scan.documents[0].docDate === "04/10/2026", JSON.stringify(legacy.verification));
+  responses = [scan(paper141()), scan({ ...paper141(), docDate: "05/10/2026" }), scan(paper141())]; modelCalls = 0;
+  const notTrue = await requestScan({ dateDefaults: "true" });
+  check("v8: רק dateDefaults === true מוותר על בדיקת התאריך", notTrue.ok && modelCalls === 3 && notTrue.verification.dateDefaults === false);
+  responses = [scan({ ...paper141(), docDate: null }), scan({ ...paper141(), docDate: null })]; modelCalls = 0;
+  const noDate = await requestScan({ dateDefaults: true });
+  check("v8: תאריך שלא נקרא באף קריאה — עדיין שתי קריאות ו-agreed, מסומן 'unreadable'",
+    noDate.ok && modelCalls === 2 && noDate.verification.status === "agreed"
+    && JSON.stringify(noDate.verification.docDateUnreliable) === JSON.stringify([{ noteIndex: 0, reason: "unreadable" }]), JSON.stringify(noDate.verification));
+  check("v8: התאריך עדיין נקרא — שדה חובה בסכימה ובהנחיה", docSchema.required.includes("docDate") && systemText.includes("docDate הוא \"תאריך יום עבודה\""));
+  check("v8: קריאה רגילה שהתאריך שלה אושר מחזירה רשימה ריקה", Array.isArray(small.verification.docDateUnreliable) && small.verification.docDateUnreliable.length === 0);
+  const health = await new Promise(resolve => {
+    const request = Readable.from([]);
+    request.method = "GET"; request.url = "/health"; request.socket = { remoteAddress: "127.0.0.1" }; request.headers = {};
+    server.emit("request", request, { headersSent: false, writeHead() { this.headersSent = true; }, write() {}, end(body) { resolve(JSON.parse(body)); } });
+  });
+  check("v8: /health מדווח גרסה 8", health.ok && health.version === 8 && health.serviceVersion === 8, JSON.stringify(health));
   modelCalls = 0;
   const invalidTarget = await requestScan({ mode: 'verify', verificationTargets: [{ noteIndex: 0, field: 'instructions', text: 'arbitrary prompt' }] });
   check("הנחיות אימות לא תקינות נדחות לפני קריאת המודל", invalidTarget.ok === false && invalidTarget.error === 'invalid_verification_targets' && modelCalls === 0);

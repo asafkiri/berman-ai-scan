@@ -59,7 +59,7 @@ const OPENAI_IMAGE_DETAIL = "original";
 const OPENAI_REASONING_EFFORT = "medium";
 const OPENAI_MAX_OUTPUT_TOKENS = 48_000;
 const OPENAI_TIMEOUT_MS = 180_000;
-const SERVICE_VERSION = 7; // two independent reads + one bounded verification; v6 records what triggered it; v7 reads the paper's header and control numbers
+const SERVICE_VERSION = 8; // two independent reads + one bounded verification; v6 records what triggered it; v7 reads the paper's header and control numbers; v8 for a client that sends dateDefaults the date never escalates — verification.docDateUnreliable (without it: v7's date checks)
 // עוגן היחידות: כמות יכולה להיות עשרונית רק בטעות קריאה; ההשוואה בסבילות אפס מעשית.
 const CHECKSUM_UNITS_TOLERANCE = 0.001;
 const FIREBASE_PROJECT_ID = "berman-marketkiri";
@@ -1472,8 +1472,10 @@ function decodeAnalyzeClaims(result, aliasToId) {
         return { scan, data, openaiResponse, callModel };
       };
 
+      // v8: only a client that sets its own day for a date that was not read well (app 142+ sends
+      // dateDefaults: true) gets the date left out of the checks; any other request keeps v7's date checks.
       const verified = await runVerifiedScan({ attemptScan, documents, checksum: scanChecksumMismatches,
-        verificationOnly, targets: verificationTargets });
+        verificationOnly, targets: verificationTargets, dateDefaults: body.dateDefaults === true });
       const { selected, verification, reads, usage } = verified;
       // One structured line per paid stronger read (Cloud Run logs): which fields caused it.
       // No image, no document number, no quantities — field names, reasons and counts only.
