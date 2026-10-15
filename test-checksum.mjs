@@ -257,6 +257,15 @@ try {
   check("v8: תאריך שלא נקרא באף קריאה — עדיין שתי קריאות ו-agreed, מסומן 'unreadable'",
     noDate.ok && modelCalls === 2 && noDate.verification.status === "agreed"
     && JSON.stringify(noDate.verification.docDateUnreliable) === JSON.stringify([{ noteIndex: 0, reason: "unreadable" }]), JSON.stringify(noDate.verification));
+  check("v8: תאריך שלא נקרא באף קריאה — אין יום לשאת (docDateRead ריק)", Array.isArray(noDate.verification.docDateRead) && noDate.verification.docDateRead.length === 0, JSON.stringify(noDate.verification));
+  // הקריאה הסופית בלי תאריך, והקריאה השנייה קראה 04/10 — אף קריאה לא חולקת: לא "unreadable", היום נמסר בנפרד
+  responses = [scan({ ...paper141(), docDate: null }), scan(paper141())]; modelCalls = 0;
+  const oneRead = await requestScan({ dateDefaults: true });
+  check("v8: הקריאה הסופית בלי תאריך והשנייה קראה יום — docDateRead, בלי סימן, והמודפס לא נדרס",
+    oneRead.ok && modelCalls === 2 && oneRead.verification.status === "agreed"
+    && JSON.stringify(oneRead.verification.docDateUnreliable) === "[]"
+    && JSON.stringify(oneRead.verification.docDateRead) === JSON.stringify([{ noteIndex: 0, day: "2026-10-04" }])
+    && oneRead.scan.documents[0].docDate === null, JSON.stringify(oneRead.verification));
   check("v8: התאריך עדיין נקרא — שדה חובה בסכימה ובהנחיה", docSchema.required.includes("docDate") && systemText.includes("docDate הוא \"תאריך יום עבודה\""));
   check("v8: קריאה רגילה שהתאריך שלה אושר מחזירה רשימה ריקה", Array.isArray(small.verification.docDateUnreliable) && small.verification.docDateUnreliable.length === 0);
   const health = await new Promise(resolve => {

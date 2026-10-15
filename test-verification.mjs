@@ -384,11 +384,38 @@ test('v8: a read without a date neither confirms nor disputes; only the final re
   assert.equal(firstRead.calls.length, 2);
   assert.equal(firstRead.verification.status, 'agreed');
   assert.deepEqual(firstRead.verification.docDateUnreliable, [], 'the other read saw no date, so nothing disputes it');
+  assert.deepEqual(firstRead.verification.docDateRead, [], 'the final read has its own date');
+  // the same evidence with the reads swapped: the final read has no date and the other read 14/09 —
+  // nothing disputes that day, so it is not "unreadable"; it is reported apart (docDateRead),
+  // and the printed value of the final read stays as read
   const missing = await run8([result(dated(null)), result(paper())]);
   assert.equal(missing.calls.length, 2);
   assert.equal(missing.verification.status, 'agreed');
-  assert.deepEqual(missing.verification.docDateUnreliable, [{ noteIndex: 0, reason: 'unreadable' }]);
-  assert.equal(missing.selected.scan.documents[0].docDate, null, 'no date is borrowed from the other read');
+  assert.deepEqual(missing.verification.docDateUnreliable, []);
+  assert.deepEqual(missing.verification.docDateRead, [{ noteIndex: 0, day: '2026-09-14' }]);
+  assert.equal(missing.selected.scan.documents[0].docDate, null, 'no date is borrowed into the scan from the other read');
+});
+test('v8: the final read has no date — another read\'s day is reported only when the other reads read exactly one day', async () => {
+  const price = date => { const s = dated(date); s.documents[0].rows[1].unitPriceExVat = 14.84; return s; };
+  // two other reads, two different days — nothing to carry: unreadable, as before
+  const split = await run8([result(price('14/09/2026')), result(dated('15/09/2026')), result(dated(null), 'terra')]);
+  assert.equal(split.calls.length, 3);
+  assert.deepEqual(split.verification.docDateUnreliable, [{ noteIndex: 0, reason: 'unreadable' }]);
+  assert.deepEqual(split.verification.docDateRead, []);
+  // the same day in two formats is one day
+  const same = await run8([result(price('14/09/26')), result(dated('2026-09-14')), result(dated(null), 'terra')]);
+  assert.deepEqual(same.verification.docDateUnreliable, []);
+  assert.deepEqual(same.verification.docDateRead, [{ noteIndex: 0, day: '2026-09-14' }]);
+  // a text or 31/02 in another read is not a day
+  const junk = await run8([result(dated(null)), result(dated('31/02/2026'))]);
+  assert.deepEqual(junk.verification.docDateUnreliable, [{ noteIndex: 0, reason: 'unreadable' }]);
+  assert.deepEqual(junk.verification.docDateRead, []);
+  // without dateDefaults (app 141) the date is still checked as in v7: a missing date pays for the stronger
+  // read and stays needs_review when that read misses it too — the extra field changes nothing there
+  const legacy = await run([result(dated(null)), result(paper()), result(dated(null), 'terra')]);
+  assert.equal(legacy.calls.length, 3);
+  assert.equal(legacy.verification.status, 'needs_review');
+  assert.ok(legacy.verification.issues.some(i => i.field === 'docDate'));
 });
 test('v8: when the stronger read ran for another reason, its date is still checked against the cheap pair', async () => {
   const price = date => { const s = dated(date); s.documents[0].rows[1].unitPriceExVat = 14.84; return s; };
@@ -404,11 +431,18 @@ test('v8: when the stronger read ran for another reason, its date is still check
   assert.equal(disputed.verification.status, 'verified', 'the date alone never makes needs_review');
   assert.equal(disputed.selected.scan.documents[0].docDate, '14/09/2026');
   assert.deepEqual(disputed.verification.docDateUnreliable, [{ noteIndex: 0, reason: 'disputed' }]);
-  // the stronger read could not read the date
+  // the stronger read could not read the date; both cheap reads read 14/09 — that day is carried apart
+  // (docDateRead), the stronger read's printed value stays null
   const unread = await run8([result(price('14/09/2026')), result(paper()), result(dated(null), 'terra')]);
   assert.equal(unread.verification.status, 'verified');
   assert.deepEqual(unread.verification.issues, []);
-  assert.deepEqual(unread.verification.docDateUnreliable, [{ noteIndex: 0, reason: 'unreadable' }]);
+  assert.deepEqual(unread.verification.docDateUnreliable, []);
+  assert.deepEqual(unread.verification.docDateRead, [{ noteIndex: 0, day: '2026-09-14' }]);
+  assert.equal(unread.selected.scan.documents[0].docDate, null);
+  // no read read a date at all — unreadable
+  const none = await run8([result(price(null)), result(dated(null)), result(dated(null), 'terra')]);
+  assert.deepEqual(none.verification.docDateUnreliable, [{ noteIndex: 0, reason: 'unreadable' }]);
+  assert.deepEqual(none.verification.docDateRead, []);
 });
 test('v8: a failed stronger read keeps its other issues but never adds the date to them', async () => {
   const wrong = dated('15/09/2026'); wrong.documents[0].rows[1].unitPriceExVat = 14.84;
@@ -436,6 +470,7 @@ test('v8: a client-requested verification has one read — only an unread date c
   assert.equal(unread.calls.length, 1);
   assert.equal(unread.verification.status, 'verified');
   assert.deepEqual(unread.verification.docDateUnreliable, [{ noteIndex: 0, reason: 'unreadable' }]);
+  assert.deepEqual(unread.verification.docDateRead, [], 'one read — no other read to carry a day from');
 });
 // שומר: רק התאריך יצא מהבדיקה — כל שדה סיכום אחר שלא נקרא עדיין משלם על הקריאה החזקה.
 for (const field of ['docNumber', 'totalUnits', 'printedLines', 'netToChargeExVat']) {

@@ -38,24 +38,37 @@ export function docDateIso(value) {
   const d = new Date(Date.UTC(y, month - 1, day));
   return d.getUTCFullYear() === y && d.getUTCMonth() === month - 1 && d.getUTCDate() === day ? d.toISOString().slice(0, 10) : null;
 }
-// v8: the documents whose final docDate the client should not use as the
-// receiving day. 'unreadable': the final read has no real calendar date.
-// 'disputed': another successful read of the same request read a different date
-// and none read the final one. A read without a date neither confirms nor
-// disputes. The delivery day is not known here, so "after the delivery day" is
-// the client's check. Nothing is changed in the scan itself.
-export function unreliableDocDates(scan, others = []) {
-  const out = [];
+// v8: the final read's docDate against every other successful read of the request.
+// A read without a date neither confirms nor disputes.
+//   unreliable — documents whose day the client should not use as the receiving day:
+//     'unreadable': no read has a usable day (the final read has no real calendar date,
+//       and the other reads read none, or more than one).
+//     'disputed': another read read a different date and none read the final one.
+//   read — the final read has no date, but the other reads read exactly one day (every
+//     one that read a date read that day): { noteIndex, day }. Nothing disputes it, so
+//     it is not 'unreadable' — the same rule the client applies to its own verify read
+//     (__bermanDocDateRead). Which of the parallel reads happened to miss the date no
+//     longer decides the outcome.
+// The delivery day is not known here, so "after the delivery day" is the client's check.
+// Nothing is changed in the scan itself: the final read's printed value stays as read.
+export function judgeDocDates(scan, others = []) {
+  const unreliable = [], read = [];
   for (const doc of (scan && scan.documents) || []) {
     if (!doc) continue;
     const day = docDateIso(doc.docDate);
-    if (!day) { out.push({ noteIndex: doc.noteIndex, reason: 'unreadable' }); continue; }
-    const read = others.map(other => ((other && other.documents) || []).find(d => d && d.noteIndex === doc.noteIndex))
+    const seen = others.map(other => ((other && other.documents) || []).find(d => d && d.noteIndex === doc.noteIndex))
       .map(d => d ? docDateIso(d.docDate) : null).filter(Boolean);
-    if (read.length && !read.includes(day)) out.push({ noteIndex: doc.noteIndex, reason: 'disputed' });
+    if (!day) {
+      const days = [...new Set(seen)];
+      if (days.length === 1) read.push({ noteIndex: doc.noteIndex, day: days[0] });
+      else unreliable.push({ noteIndex: doc.noteIndex, reason: 'unreadable' });
+      continue;
+    }
+    if (seen.length && !seen.includes(day)) unreliable.push({ noteIndex: doc.noteIndex, reason: 'disputed' });
   }
-  return out;
+  return { unreliable, read };
 }
+export function unreliableDocDates(scan, others = []) { return judgeDocDates(scan, others).unreliable; }
 function orderedRows(doc) {
   return (doc.rows || []).map((row, rowIndex) => ({ row, rowIndex })).sort((a, b) => {
     const page = a.row.sourcePage - b.row.sourcePage;
@@ -283,9 +296,9 @@ export async function runVerifiedScan({ attemptScan, documents, checksum, verifi
   // (without dateDefaults the date also stays in the issues above, as in v7).
   const otherScans = scans.slice(), own = otherScans.indexOf(selected.scan);
   if (own >= 0) otherScans.splice(own, 1);
-  const docDateUnreliable = selected.scan ? unreliableDocDates(selected.scan, otherScans) : [];
+  const dates = selected.scan ? judgeDocDates(selected.scan, otherScans) : { unreliable: [], read: [] };
   return { selected, verification: { version: 1, status, primaryReads: verificationOnly ? 0 : 2,
     escalationAttempted, reasons: [...new Set(issues.map(i => i.reason))], issues: evidenced,
-    agreementCleared: remaining.length - evidenced.length, docDateUnreliable, dateDefaults: opts.dateDefaults,
+    agreementCleared: remaining.length - evidenced.length, docDateUnreliable: dates.unreliable, docDateRead: dates.read, dateDefaults: opts.dateDefaults,
     readCount: reads.length, ...(notDriverStrip ? { notDriverStrip: true } : {}), ...(escalation || {}) }, reads, usage: totalUsage(reads) };
 }
